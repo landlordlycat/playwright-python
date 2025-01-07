@@ -20,14 +20,19 @@ from playwright._impl._browser_context import BrowserContext
 from playwright._impl._browser_type import BrowserType
 from playwright._impl._cdp_session import CDPSession
 from playwright._impl._connection import ChannelOwner
-from playwright._impl._console_message import ConsoleMessage
 from playwright._impl._dialog import Dialog
 from playwright._impl._element_handle import ElementHandle
 from playwright._impl._fetch import APIRequestContext
 from playwright._impl._frame import Frame
 from playwright._impl._js_handle import JSHandle
 from playwright._impl._local_utils import LocalUtils
-from playwright._impl._network import Request, Response, Route, WebSocket
+from playwright._impl._network import (
+    Request,
+    Response,
+    Route,
+    WebSocket,
+    WebSocketRoute,
+)
 from playwright._impl._page import BindingCall, Page, Worker
 from playwright._impl._playwright import Playwright
 from playwright._impl._selectors import SelectorsOwner
@@ -60,8 +65,6 @@ def create_remote_object(
         return BrowserContext(parent, type, guid, initializer)
     if type == "CDPSession":
         return CDPSession(parent, type, guid, initializer)
-    if type == "ConsoleMessage":
-        return ConsoleMessage(parent, type, guid, initializer)
     if type == "Dialog":
         return Dialog(parent, type, guid, initializer)
     if type == "ElementHandle":
@@ -71,7 +74,10 @@ def create_remote_object(
     if type == "JSHandle":
         return JSHandle(parent, type, guid, initializer)
     if type == "LocalUtils":
-        return LocalUtils(parent, type, guid, initializer)
+        local_utils = LocalUtils(parent, type, guid, initializer)
+        if not local_utils._connection._local_utils:
+            local_utils._connection._local_utils = local_utils
+        return local_utils
     if type == "Page":
         return Page(parent, type, guid, initializer)
     if type == "Playwright":
@@ -88,6 +94,8 @@ def create_remote_object(
         return Tracing(parent, type, guid, initializer)
     if type == "WebSocket":
         return WebSocket(parent, type, guid, initializer)
+    if type == "WebSocketRoute":
+        return WebSocketRoute(parent, type, guid, initializer)
     if type == "Worker":
         return Worker(parent, type, guid, initializer)
     if type == "WritableStream":

@@ -14,6 +14,7 @@
 
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -64,9 +65,9 @@ def test_should_support_global_user_agent_option(
 def test_should_support_global_timeout_option(
     playwright: Playwright, server: Server
 ) -> None:
-    request = playwright.request.new_context(timeout=1)
+    request = playwright.request.new_context(timeout=100)
     server.set_route("/empty.html", lambda req: None)
-    with pytest.raises(Error, match="Request timed out after 1ms"):
+    with pytest.raises(Error, match="Request timed out after 100ms"):
         request.get(server.EMPTY_PAGE)
 
 
@@ -79,7 +80,7 @@ def test_should_propagate_extra_http_headers_with_redirects(
     with server.expect_request("/a/redirect1") as server_req1:
         with server.expect_request("/b/c/redirect2") as server_req2:
             with server.expect_request("/simple.json") as server_req3:
-                request.get(f"{server.PREFIX}/a/redirect1"),
+                request.get(f"{server.PREFIX}/a/redirect1")
     assert server_req1.value.getHeader("my-secret") == "Value"
     assert server_req2.value.getHeader("my-secret") == "Value"
     assert server_req3.value.getHeader("my-secret") == "Value"
@@ -115,6 +116,82 @@ def test_should_return_error_with_wrong_credentials(
     assert response.ok is False
 
 
+def test_should_work_with_correct_credentials_and_matching_origin(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_auth("/empty.html", "user", "pass")
+    request = playwright.request.new_context(
+        http_credentials={
+            "username": "user",
+            "password": "pass",
+            "origin": server.PREFIX,
+        }
+    )
+    response = request.get(server.EMPTY_PAGE)
+    assert response.status == 200
+    response.dispose()
+
+
+def test_should_work_with_correct_credentials_and_matching_origin_case_insensitive(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_auth("/empty.html", "user", "pass")
+    request = playwright.request.new_context(
+        http_credentials={
+            "username": "user",
+            "password": "pass",
+            "origin": server.PREFIX.upper(),
+        }
+    )
+    response = request.get(server.EMPTY_PAGE)
+    assert response.status == 200
+    response.dispose()
+
+
+def test_should_return_error_with_correct_credentials_and_mismatching_scheme(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_auth("/empty.html", "user", "pass")
+    request = playwright.request.new_context(
+        http_credentials={
+            "username": "user",
+            "password": "pass",
+            "origin": server.PREFIX.replace("http://", "https://"),
+        }
+    )
+    response = request.get(server.EMPTY_PAGE)
+    assert response.status == 401
+    response.dispose()
+
+
+def test_should_return_error_with_correct_credentials_and_mismatching_hostname(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_auth("/empty.html", "user", "pass")
+    hostname = urlparse(server.PREFIX).hostname
+    assert hostname
+    origin = server.PREFIX.replace(hostname, "mismatching-hostname")
+    request = playwright.request.new_context(
+        http_credentials={"username": "user", "password": "pass", "origin": origin}
+    )
+    response = request.get(server.EMPTY_PAGE)
+    assert response.status == 401
+    response.dispose()
+
+
+def test_should_return_error_with_correct_credentials_and_mismatching_port(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_auth("/empty.html", "user", "pass")
+    origin = server.PREFIX.replace(str(server.PORT), str(server.PORT + 1))
+    request = playwright.request.new_context(
+        http_credentials={"username": "user", "password": "pass", "origin": origin}
+    )
+    response = request.get(server.EMPTY_PAGE)
+    assert response.status == 401
+    response.dispose()
+
+
 def test_should_support_global_ignore_https_errors_option(
     playwright: Playwright, https_server: Server
 ) -> None:
@@ -142,7 +219,7 @@ def test_should_use_playwright_as_a_user_agent(
 ) -> None:
     request = playwright.request.new_context()
     with server.expect_request("/empty.html") as server_req:
-        request.get(server.EMPTY_PAGE),
+        request.get(server.EMPTY_PAGE)
     assert str(server_req.value.getHeader("User-Agent")).startswith("Playwright/")
     request.dispose()
 
@@ -187,3 +264,62 @@ def test_storage_state_should_round_trip_through_file(
     request2 = playwright.request.new_context(storage_state=path)
     state2 = request2.storage_state()
     assert state2 == expected
+
+
+def test_should_throw_an_error_when_max_redirects_is_exceeded(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_redirect("/a/redirect1", "/b/c/redirect2")
+    server.set_redirect("/b/c/redirect2", "/b/c/redirect3")
+    server.set_redirect("/b/c/redirect3", "/b/c/redirect4")
+    server.set_redirect("/b/c/redirect4", "/simple.json")
+
+    request = playwright.request.new_context()
+    for method in ["GET", "PUT", "POST", "OPTIONS", "HEAD", "PATCH"]:
+        for max_redirects in [1, 2, 3]:
+            with pytest.raises(Error) as exc_info:
+                request.fetch(
+                    server.PREFIX + "/a/redirect1",
+                    method=method,
+                    max_redirects=max_redirects,
+                )
+            assert "Max redirect count exceeded" in str(exc_info)
+
+
+def test_should_not_follow_redirects_when_max_redirects_is_set_to_0(
+    playwright: Playwright, server: Server
+) -> None:
+    server.set_redirect("/a/redirect1", "/b/c/redirect2")
+    server.set_redirect("/b/c/redirect2", "/simple.json")
+
+    request = playwright.request.new_context()
+    for method in ["GET", "PUT", "POST", "OPTIONS", "HEAD", "PATCH"]:
+        response = request.fetch(
+            server.PREFIX + "/a/redirect1", method=method, max_redirects=0
+        )
+        assert response.headers["location"] == "/b/c/redirect2"
+        assert response.status == 302
+
+
+def test_should_throw_an_error_when_max_redirects_is_less_than_0(
+    playwright: Playwright,
+    server: Server,
+) -> None:
+    request = playwright.request.new_context()
+    for method in ["GET", "PUT", "POST", "OPTIONS", "HEAD", "PATCH"]:
+        with pytest.raises(AssertionError) as exc_info:
+            request.fetch(
+                server.PREFIX + "/a/redirect1", method=method, max_redirects=-1
+            )
+        assert "'max_redirects' must be greater than or equal to '0'" in str(exc_info)
+
+
+def test_should_serialize_null_values_in_json(
+    playwright: Playwright, server: Server
+) -> None:
+    request = playwright.request.new_context()
+    server.set_route("/echo", lambda req: (req.write(req.post_body), req.finish()))
+    response = request.post(server.PREFIX + "/echo", data={"foo": None})
+    assert response.status == 200
+    assert response.text() == '{"foo": null}'
+    request.dispose()

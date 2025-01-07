@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import asyncio
-import traceback
+from contextlib import AbstractAsyncContextManager
 from types import TracebackType
-from typing import Any, Awaitable, Callable, Generic, Type, TypeVar
+from typing import Any, Callable, Generic, Optional, Type, TypeVar, Union
 
 from playwright._impl._impl_to_api_mapping import ImplToApiMapping, ImplWrapper
 
@@ -34,11 +34,14 @@ class AsyncEventInfo(Generic[T]):
     async def value(self) -> T:
         return mapping.from_maybe_impl(await self._future)
 
+    def _cancel(self) -> None:
+        self._future.cancel()
+
     def is_done(self) -> bool:
         return self._future.done()
 
 
-class AsyncEventContextManager(Generic[T]):
+class AsyncEventContextManager(Generic[T], AbstractAsyncContextManager):
     def __init__(self, future: "asyncio.Future[T]") -> None:
         self._event = AsyncEventInfo[T](future)
 
@@ -47,11 +50,14 @@ class AsyncEventContextManager(Generic[T]):
 
     async def __aexit__(
         self,
-        exc_type: Type[BaseException],
-        exc_val: BaseException,
-        exc_tb: TracebackType,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
     ) -> None:
-        await self._event.value
+        if exc_val:
+            self._event._cancel()
+        else:
+            await self._event.value
 
 
 class AsyncBase(ImplWrapper):
@@ -62,13 +68,9 @@ class AsyncBase(ImplWrapper):
     def __str__(self) -> str:
         return self._impl_obj.__str__()
 
-    def _async(self, api_name: str, coro: Awaitable) -> Any:
-        task = asyncio.current_task()
-        setattr(task, "__pw_api_name__", api_name)
-        setattr(task, "__pw_stack_trace__", traceback.extract_stack())
-        return coro
-
-    def _wrap_handler(self, handler: Any) -> Callable[..., None]:
+    def _wrap_handler(
+        self, handler: Union[Callable[..., Any], Any]
+    ) -> Callable[..., None]:
         if callable(handler):
             return mapping.wrap_handler(handler)
         return handler
@@ -100,5 +102,4 @@ class AsyncContextManager(AsyncBase):
     ) -> None:
         await self.close()
 
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...

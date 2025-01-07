@@ -14,6 +14,7 @@
 
 import os
 import re
+import traceback
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -268,6 +269,15 @@ def test_locators_fill_should_work(page: Page, server: Server) -> None:
     assert page.evaluate("result") == "some value"
 
 
+def test_locators_clear_should_work(page: Page, server: Server) -> None:
+    page.goto(server.PREFIX + "/input/textarea.html")
+    button = page.locator("input")
+    button.fill("some value")
+    assert page.evaluate("result") == "some value"
+    button.clear()
+    assert page.evaluate("result") == ""
+
+
 def test_locators_check_should_work(page: Page) -> None:
     page.set_content("<input id='checkbox' type='checkbox'></input>")
     button = page.locator("input")
@@ -320,7 +330,7 @@ def test_locators_should_upload_a_file(page: Page, server: Server) -> None:
 def test_locators_should_press(page: Page) -> None:
     page.set_content("<input type='text' />")
     page.locator("input").press("h")
-    page.eval_on_selector("input", "input => input.value") == "h"
+    assert page.eval_on_selector("input", "input => input.value") == "h"
 
 
 def test_locators_should_scroll_into_view(page: Page, server: Server) -> None:
@@ -346,7 +356,8 @@ def test_locators_should_select_textarea(
     textarea = page.locator("textarea")
     textarea.evaluate("textarea => textarea.value = 'some value'")
     textarea.select_text()
-    if browser_name == "firefox":
+    textarea.select_text(timeout=25_000)
+    if browser_name == "firefox" or browser_name == "webkit":
         assert textarea.evaluate("el => el.selectionStart") == 0
         assert textarea.evaluate("el => el.selectionEnd") == 10
     else:
@@ -356,7 +367,7 @@ def test_locators_should_select_textarea(
 def test_locators_should_type(page: Page) -> None:
     page.set_content("<input type='text' />")
     page.locator("input").type("hello")
-    page.eval_on_selector("input", "input => input.value") == "hello"
+    assert page.eval_on_selector("input", "input => input.value") == "hello"
 
 
 def test_locators_should_screenshot(
@@ -372,6 +383,9 @@ def test_locators_should_screenshot(
     page.evaluate("window.scrollBy(50, 100)")
     element = page.locator(".box:nth-of-type(3)")
     assert_to_be_golden(element.screenshot(), "screenshot-element-bounding-box.png")
+    assert_to_be_golden(
+        element.screenshot(timeout=1_000), "screenshot-element-bounding-box.png"
+    )
 
 
 def test_locators_should_return_bounding_box(page: Page, server: Server) -> None:
@@ -460,11 +474,64 @@ def test_locators_set_checked(page: Page) -> None:
     assert page.evaluate("checkbox.checked") is False
 
 
+def test_should_combine_visible_with_other_selectors(page: Page) -> None:
+    page.set_content(
+        """<div>
+        <div class="item" style="display: none">Hidden data0</div>
+        <div class="item">visible data1</div>
+        <div class="item" style="display: none">Hidden data1</div>
+        <div class="item">visible data2</div>
+        <div class="item" style="display: none">Hidden data1</div>
+        <div class="item">visible data3</div>
+        </div>
+    """
+    )
+    locator = page.locator(".item >> visible=true").nth(1)
+    expect(locator).to_have_text("visible data2")
+    expect(page.locator(".item >> visible=true >> text=data3")).to_have_text(
+        "visible data3"
+    )
+
+
+def test_locator_count_should_work_with_deleted_map_in_main_world(page: Page) -> None:
+    page.evaluate("Map = 1")
+    page.locator("#searchResultTableDiv .x-grid3-row").count()
+    expect(page.locator("#searchResultTableDiv .x-grid3-row")).to_have_count(0)
+
+
+def test_locator_locator_and_framelocator_locator_should_accept_locator(
+    page: Page,
+) -> None:
+    page.set_content(
+        """
+        <div><input value=outer></div>
+        <iframe srcdoc="<div><input value=inner></div>"></iframe>
+    """
+    )
+
+    input_locator = page.locator("input")
+    assert input_locator.input_value() == "outer"
+    assert page.locator("div").locator(input_locator).input_value() == "outer"
+    assert page.frame_locator("iframe").locator(input_locator).input_value() == "inner"
+    assert (
+        page.frame_locator("iframe").locator("div").locator(input_locator).input_value()
+        == "inner"
+    )
+
+    div_locator = page.locator("div")
+    assert div_locator.locator("input").input_value() == "outer"
+    assert (
+        page.frame_locator("iframe").locator(div_locator).locator("input").input_value()
+        == "inner"
+    )
+
+
 def route_iframe(page: Page) -> None:
     page.route(
         "**/empty.html",
         lambda route: route.fulfill(
-            body='<iframe src="iframe.html"></iframe>', content_type="text/html"
+            body='<iframe src="iframe.html" name="frame1"></iframe>',
+            content_type="text/html",
         ),
     )
     page.route(
@@ -525,6 +592,26 @@ def test_locators_frame_should_work_with_locator_frame_locator(
     button.click()
 
 
+def test_locator_content_frame_should_work(page: Page, server: Server) -> None:
+    route_iframe(page)
+    page.goto(server.EMPTY_PAGE)
+    locator = page.locator("iframe")
+    frame_locator = locator.content_frame
+    button = frame_locator.locator("button")
+    assert button.inner_text() == "Hello iframe"
+    expect(button).to_have_text("Hello iframe")
+    button.click()
+
+
+def test_frame_locator_owner_should_work(page: Page, server: Server) -> None:
+    route_iframe(page)
+    page.goto(server.EMPTY_PAGE)
+    frame_locator = page.frame_locator("iframe")
+    locator = frame_locator.owner
+    expect(locator).to_be_visible()
+    assert locator.get_attribute("name") == "frame1"
+
+
 def route_ambiguous(page: Page) -> None:
     page.route(
         "**/empty.html",
@@ -554,7 +641,7 @@ def test_locator_frame_locator_should_throw_on_ambiguity(
     button = page.locator("body").frame_locator("iframe").locator("button")
     with pytest.raises(
         Error,
-        match='.*strict mode violation: "body >> iframe" resolved to 3 elements.*',
+        match=r'.*strict mode violation: locator\("body"\)\.locator\("iframe"\) resolved to 3 elements.*',
     ):
         button.wait_for()
 
@@ -680,4 +767,211 @@ def test_locator_should_enforce_same_frame_for_has_locator(
         page.locator("div", has=child.locator("span"))
     assert (
         'Inner "has" locator must belong to the same frame.' in exc_info.value.message
+    )
+
+
+def test_locator_should_support_locator_or(page: Page, server: Server) -> None:
+    page.set_content("<div>hello</div><span>world</span>")
+    expect(page.locator("div").or_(page.locator("span"))).to_have_count(2)
+    expect(page.locator("div").or_(page.locator("span"))).to_have_text(
+        ["hello", "world"]
+    )
+    expect(
+        page.locator("span").or_(page.locator("article")).or_(page.locator("div"))
+    ).to_have_text(["hello", "world"])
+    expect(page.locator("article").or_(page.locator("someting"))).to_have_count(0)
+    expect(page.locator("article").or_(page.locator("div"))).to_have_text("hello")
+    expect(page.locator("article").or_(page.locator("span"))).to_have_text("world")
+    expect(page.locator("div").or_(page.locator("article"))).to_have_text("hello")
+    expect(page.locator("span").or_(page.locator("article"))).to_have_text("world")
+
+
+def test_locator_highlight_should_work(page: Page, server: Server) -> None:
+    page.goto(server.PREFIX + "/grid.html")
+    page.locator(".box").nth(3).highlight()
+    assert page.locator("x-pw-glass").is_visible()
+
+
+def test_should_support_locator_that(page: Page) -> None:
+    page.set_content(
+        "<section><div><span>hello</span></div><div><span>world</span></div></section>"
+    )
+
+    expect(page.locator("div").filter(has_text="hello")).to_have_count(1)
+    expect(
+        page.locator("div", has_text="hello").filter(has_text="hello")
+    ).to_have_count(1)
+    expect(
+        page.locator("div", has_text="hello").filter(has_text="world")
+    ).to_have_count(0)
+    expect(
+        page.locator("section", has_text="hello").filter(has_text="world")
+    ).to_have_count(1)
+    expect(page.locator("div").filter(has_text="hello").locator("span")).to_have_count(
+        1
+    )
+    expect(
+        page.locator("div").filter(has=page.locator("span", has_text="world"))
+    ).to_have_count(1)
+    expect(page.locator("div").filter(has=page.locator("span"))).to_have_count(2)
+    expect(
+        page.locator("div").filter(
+            has=page.locator("span"),
+            has_text="world",
+        )
+    ).to_have_count(1)
+
+
+def test_should_filter_by_case_insensitive_regex_in_a_child(page: Page) -> None:
+    page.set_content('<div class="test"><h5>Title Text</h5></div>')
+    expect(
+        page.locator("div", has_text=re.compile(r"^title text$", re.I))
+    ).to_have_text("Title Text")
+
+
+def test_should_filter_by_case_insensitive_regex_in_multiple_children(
+    page: Page,
+) -> None:
+    page.set_content('<div class="test"><h5>Title</h5> <h2><i>Text</i></h2></div>')
+    expect(
+        page.locator("div", has_text=re.compile(r"^title text$", re.I))
+    ).to_have_class("test")
+
+
+def test_should_filter_by_regex_with_special_symbols(page: Page) -> None:
+    page.set_content(
+        '<div class="test"><h5>First/"and"</h5><h2><i>Second\\</i></h2></div>'
+    )
+    expect(
+        page.locator("div", has_text=re.compile(r'^first\/".*"second\\$', re.S | re.I))
+    ).to_have_class("test")
+
+
+def test_should_support_locator_filter(page: Page) -> None:
+    page.set_content(
+        "<section><div><span>hello</span></div><div><span>world</span></div></section>"
+    )
+
+    expect(page.locator("div").filter(has_text="hello")).to_have_count(1)
+    expect(
+        page.locator("div", has_text="hello").filter(has_text="hello")
+    ).to_have_count(1)
+    expect(
+        page.locator("div", has_text="hello").filter(has_text="world")
+    ).to_have_count(0)
+    expect(
+        page.locator("section", has_text="hello").filter(has_text="world")
+    ).to_have_count(1)
+    expect(page.locator("div").filter(has_text="hello").locator("span")).to_have_count(
+        1
+    )
+    expect(
+        page.locator("div").filter(has=page.locator("span", has_text="world"))
+    ).to_have_count(1)
+    expect(page.locator("div").filter(has=page.locator("span"))).to_have_count(2)
+    expect(
+        page.locator("div").filter(
+            has=page.locator("span"),
+            has_text="world",
+        )
+    ).to_have_count(1)
+    expect(
+        page.locator("div").filter(has_not=page.locator("span", has_text="world"))
+    ).to_have_count(1)
+    expect(page.locator("div").filter(has_not=page.locator("section"))).to_have_count(2)
+    expect(page.locator("div").filter(has_not=page.locator("span"))).to_have_count(0)
+
+    expect(page.locator("div").filter(has_not_text="hello")).to_have_count(1)
+    expect(page.locator("div").filter(has_not_text="foo")).to_have_count(2)
+
+
+def test_locators_should_support_locator_and(page: Page) -> None:
+    page.set_content(
+        """
+        <div data-testid=foo>hello</div><div data-testid=bar>world</div>
+        <span data-testid=foo>hello2</span><span data-testid=bar>world2</span>
+    """
+    )
+    expect(page.locator("div").and_(page.locator("div"))).to_have_count(2)
+    expect(page.locator("div").and_(page.get_by_test_id("foo"))).to_have_text(["hello"])
+    expect(page.locator("div").and_(page.get_by_test_id("bar"))).to_have_text(["world"])
+    expect(page.get_by_test_id("foo").and_(page.locator("div"))).to_have_text(["hello"])
+    expect(page.get_by_test_id("bar").and_(page.locator("span"))).to_have_text(
+        ["world2"]
+    )
+    expect(
+        page.locator("span").and_(page.get_by_test_id(re.compile("bar|foo")))
+    ).to_have_count(2)
+
+
+def test_locators_has_does_not_encode_unicode(page: Page, server: Server) -> None:
+    page.goto(server.EMPTY_PAGE)
+    locators = [
+        page.locator("button", has_text="Драматург"),
+        page.locator("button", has_text=re.compile("Драматург")),
+        page.locator("button", has=page.locator("text=Драматург")),
+    ]
+    for locator in locators:
+        with pytest.raises(Error) as exc_info:
+            locator.click(timeout=1_000)
+        assert "Драматург" in exc_info.value.message
+
+
+def test_locators_should_focus_and_blur_a_button(page: Page, server: Server) -> None:
+    page.goto(server.PREFIX + "/input/button.html")
+    button = page.locator("button")
+    assert not button.evaluate("button => document.activeElement === button")
+
+    focused = False
+    blurred = False
+
+    def focus_event() -> None:
+        nonlocal focused
+        focused = True
+
+    def blur_event() -> None:
+        nonlocal blurred
+        blurred = True
+
+    page.expose_function("focusEvent", focus_event)
+    page.expose_function("blurEvent", blur_event)
+    button.evaluate(
+        """button => {
+        button.addEventListener('focus', window['focusEvent']);
+        button.addEventListener('blur', window['blurEvent']);
+    }"""
+    )
+
+    button.focus()
+    assert focused
+    assert not blurred
+    assert button.evaluate("button => document.activeElement === button")
+
+    button.blur()
+    assert focused
+    assert blurred
+    assert not button.evaluate("button => document.activeElement === button")
+
+
+def test_locator_all_should_work(page: Page) -> None:
+    page.set_content("<div><p>A</p><p>B</p><p>C</p></div>")
+    texts = []
+    for p in page.locator("p").all():
+        texts.append(p.text_content())
+    assert texts == ["A", "B", "C"]
+
+
+def test_locator_click_timeout_error_should_contain_call_log(page: Page) -> None:
+    with pytest.raises(Error) as exc_info:
+        page.get_by_role("button", name="Hello Python").click(timeout=42)
+    formatted_exception = "".join(
+        traceback.format_exception(type(exc_info.value), value=exc_info.value, tb=None)
+    )
+    assert "Locator.click: Timeout 42ms exceeded." in formatted_exception
+    assert (
+        'waiting for get_by_role("button", name="Hello Python")' in formatted_exception
+    )
+    assert (
+        "During handling of the above exception, another exception occurred"
+        not in formatted_exception
     )

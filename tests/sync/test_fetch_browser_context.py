@@ -20,6 +20,7 @@ import pytest
 
 from playwright.sync_api import BrowserContext, Error, FilePayload, Page
 from tests.server import Server
+from tests.utils import must
 
 
 def test_get_should_work(context: BrowserContext, server: Server) -> None:
@@ -51,7 +52,7 @@ def test_fetch_should_work(context: BrowserContext, server: Server) -> None:
 
 
 def test_should_throw_on_network_error(context: BrowserContext, server: Server) -> None:
-    server.set_route("/test", lambda request: request.transport.loseConnection())
+    server.set_route("/test", lambda request: request.loseConnection())
     with pytest.raises(Error, match="socket hang up"):
         context.request.fetch(server.PREFIX + "/test")
 
@@ -88,8 +89,43 @@ def test_should_support_query_params(
         getattr(context.request, method)(
             server.EMPTY_PAGE + "?p1=foo", params=expected_params
         )
-    assert server_req.value.args["p1".encode()][0].decode() == "v1"
-    assert len(server_req.value.args["p1".encode()]) == 1
+    assert list(map(lambda x: x.decode(), server_req.value.args["p1".encode()])) == [
+        "foo",
+        "v1",
+    ]
+    assert server_req.value.args["парам2".encode()][0].decode() == "знач2"
+
+
+@pytest.mark.parametrize(
+    "method", ["fetch", "delete", "get", "head", "patch", "post", "put"]
+)
+def test_should_support_params_passed_as_object(
+    context: BrowserContext, server: Server, method: str
+) -> None:
+    params = {
+        "param1": "value1",
+        "парам2": "знач2",
+    }
+    with server.expect_request("/empty.html") as server_req:
+        getattr(context.request, method)(server.EMPTY_PAGE, params=params)
+    assert server_req.value.args["param1".encode()][0].decode() == "value1"
+    assert len(server_req.value.args["param1".encode()]) == 1
+    assert server_req.value.args["парам2".encode()][0].decode() == "знач2"
+
+
+@pytest.mark.parametrize(
+    "method", ["fetch", "delete", "get", "head", "patch", "post", "put"]
+)
+def test_should_support_params_passed_as_strings(
+    context: BrowserContext, server: Server, method: str
+) -> None:
+    params = "?param1=value1&param1=value2&парам2=знач2"
+    with server.expect_request("/empty.html") as server_req:
+        getattr(context.request, method)(server.EMPTY_PAGE, params=params)
+    assert list(
+        map(lambda x: x.decode(), server_req.value.args["param1".encode()])
+    ) == ["value1", "value2"]
+    assert len(server_req.value.args["param1".encode()]) == 2
     assert server_req.value.args["парам2".encode()][0].decode() == "знач2"
 
 
@@ -150,21 +186,17 @@ def test_should_support_post_data(
                 server.PREFIX + "/simple.json", data=fetch_data
             )
         assert request.value.method.decode() == method.upper()
-        assert request.value.post_body == request_post_data  # type: ignore
+        assert request.value.post_body == request_post_data
         assert response.status == 200
         assert response.url == server.PREFIX + "/simple.json"
         assert request.value.getHeader("Content-Length") == str(
-            len(request.value.post_body)  # type: ignore
+            len(must(request.value.post_body))
         )
 
     support_post_data("My request", "My request".encode())
     support_post_data(b"My request", "My request".encode())
-    support_post_data(
-        ["my", "request"], json.dumps(["my", "request"], separators=(",", ":")).encode()
-    )
-    support_post_data(
-        {"my": "request"}, json.dumps({"my": "request"}, separators=(",", ":")).encode()
-    )
+    support_post_data(["my", "request"], json.dumps(["my", "request"]).encode())
+    support_post_data({"my": "request"}, json.dumps({"my": "request"}).encode())
     with pytest.raises(Error, match="Unsupported 'data' type: <class 'function'>"):
         support_post_data(lambda: None, None)
 
@@ -186,9 +218,9 @@ def test_should_support_application_x_www_form_urlencoded(
         server_req.value.getHeader("Content-Type")
         == "application/x-www-form-urlencoded"
     )
-    body = server_req.value.post_body.decode()  # type: ignore
+    body = must(server_req.value.post_body).decode()
     assert server_req.value.getHeader("Content-Length") == str(len(body))
-    params: Dict[bytes, List[bytes]] = parse_qs(server_req.value.post_body)  # type: ignore
+    params: Dict[bytes, List[bytes]] = parse_qs(server_req.value.post_body)
     assert params[b"firstName"] == [b"John"]
     assert params[b"lastName"] == [b"Doe"]
     assert params[b"file"] == [b"f.js"]
@@ -216,7 +248,7 @@ def test_should_support_multipart_form_data(
     assert content_type
     assert content_type.startswith("multipart/form-data; ")
     assert server_req.value.getHeader("Content-Length") == str(
-        len(server_req.value.post_body)  # type: ignore
+        len(must(server_req.value.post_body))
     )
     assert server_req.value.args[b"firstName"] == [b"John"]
     assert server_req.value.args[b"lastName"] == [b"Doe"]

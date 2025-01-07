@@ -12,13 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sys
-from typing import Any, Dict, List, Optional, Union
-
-if sys.version_info >= (3, 8):  # pragma: no cover
-    from typing import Literal, TypedDict
-else:  # pragma: no cover
-    from typing_extensions import Literal, TypedDict
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Sequence, TypedDict, Union
 
 # These are the structures that we like keeping in a JSON form for their potential
 # reuse between SDKs / services. They are public and are a part of the
@@ -39,6 +34,7 @@ class Cookie(TypedDict, total=False):
     sameSite: Literal["Lax", "None", "Strict"]
 
 
+# TODO: We are waiting for PEP705 so SetCookieParam can be readonly and matches Cookie.
 class SetCookieParam(TypedDict, total=False):
     name: str
     value: str
@@ -64,9 +60,11 @@ class Geolocation(TypedDict, total=False):
     accuracy: Optional[float]
 
 
-class HttpCredentials(TypedDict):
+class HttpCredentials(TypedDict, total=False):
     username: str
     password: str
+    origin: Optional[str]
+    send: Optional[Literal["always", "unauthorized"]]
 
 
 class LocalStorageEntry(TypedDict):
@@ -101,6 +99,17 @@ class ProxySettings(TypedDict, total=False):
 class StorageState(TypedDict, total=False):
     cookies: List[Cookie]
     origins: List[OriginState]
+
+
+class ClientCertificate(TypedDict, total=False):
+    origin: str
+    certPath: Optional[Union[str, Path]]
+    cert: Optional[bytes]
+    keyPath: Optional[Union[str, Path]]
+    key: Optional[bytes]
+    pfxPath: Optional[Union[str, Path]]
+    pfx: Optional[bytes]
+    passphrase: Optional[str]
 
 
 class ResourceTiming(TypedDict):
@@ -179,12 +188,13 @@ class ExpectedTextValue(TypedDict, total=False):
     regexFlags: str
     matchSubstring: bool
     normalizeWhiteSpace: bool
+    ignoreCase: Optional[bool]
 
 
 class FrameExpectOptions(TypedDict, total=False):
     expressionArg: Any
-    expectedText: Optional[List[ExpectedTextValue]]
-    expectedNumber: Optional[int]
+    expectedText: Optional[Sequence[ExpectedTextValue]]
+    expectedNumber: Optional[float]
     expectedValue: Optional[Any]
     useInnerText: Optional[bool]
     isNot: bool
@@ -195,3 +205,95 @@ class FrameExpectResult(TypedDict):
     matches: bool
     received: Any
     log: List[str]
+
+
+AriaRole = Literal[
+    "alert",
+    "alertdialog",
+    "application",
+    "article",
+    "banner",
+    "blockquote",
+    "button",
+    "caption",
+    "cell",
+    "checkbox",
+    "code",
+    "columnheader",
+    "combobox",
+    "complementary",
+    "contentinfo",
+    "definition",
+    "deletion",
+    "dialog",
+    "directory",
+    "document",
+    "emphasis",
+    "feed",
+    "figure",
+    "form",
+    "generic",
+    "grid",
+    "gridcell",
+    "group",
+    "heading",
+    "img",
+    "insertion",
+    "link",
+    "list",
+    "listbox",
+    "listitem",
+    "log",
+    "main",
+    "marquee",
+    "math",
+    "menu",
+    "menubar",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "meter",
+    "navigation",
+    "none",
+    "note",
+    "option",
+    "paragraph",
+    "presentation",
+    "progressbar",
+    "radio",
+    "radiogroup",
+    "region",
+    "row",
+    "rowgroup",
+    "rowheader",
+    "scrollbar",
+    "search",
+    "searchbox",
+    "separator",
+    "slider",
+    "spinbutton",
+    "status",
+    "strong",
+    "subscript",
+    "superscript",
+    "switch",
+    "tab",
+    "table",
+    "tablist",
+    "tabpanel",
+    "term",
+    "textbox",
+    "time",
+    "timer",
+    "toolbar",
+    "tooltip",
+    "tree",
+    "treegrid",
+    "treeitem",
+]
+
+
+class TracingGroupLocation(TypedDict):
+    file: str
+    line: Optional[int]
+    column: Optional[int]

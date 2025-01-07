@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http:#www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,10 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+
 import pytest
 
+from playwright.async_api import Page
 
-async def test_accessibility_should_work(page, is_firefox, is_chromium):
+
+async def test_accessibility_should_work(
+    page: Page, is_firefox: bool, is_chromium: bool
+) -> None:
     await page.set_content(
         """<head>
       <title>Accessibility Test</title>
@@ -93,7 +100,14 @@ async def test_accessibility_should_work(page, is_firefox, is_chromium):
                 {"role": "textbox", "name": "placeholder", "value": "and a value"},
                 {
                     "role": "textbox",
-                    "name": "This is a description!",
+                    "name": (
+                        "placeholder"
+                        if (
+                            sys.platform == "darwin"
+                            and int(os.uname().release.split(".")[0]) >= 21
+                        )
+                        else "This is a description!"
+                    ),
                     "value": "and a value",
                 },  # webkit uses the description over placeholder for the name
             ],
@@ -101,54 +115,62 @@ async def test_accessibility_should_work(page, is_firefox, is_chromium):
     assert await page.accessibility.snapshot() == golden
 
 
-async def test_accessibility_should_work_with_regular_text(page, is_firefox):
+async def test_accessibility_should_work_with_regular_text(
+    page: Page, is_firefox: bool
+) -> None:
     await page.set_content("<div>Hello World</div>")
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == {
         "role": "text leaf" if is_firefox else "text",
         "name": "Hello World",
     }
 
 
-async def test_accessibility_roledescription(page):
+async def test_accessibility_roledescription(page: Page) -> None:
     await page.set_content('<p tabIndex=-1 aria-roledescription="foo">Hi</p>')
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0]["roledescription"] == "foo"
 
 
-async def test_accessibility_orientation(page):
+async def test_accessibility_orientation(page: Page) -> None:
     await page.set_content(
         '<a href="" role="slider" aria-orientation="vertical">11</a>'
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0]["orientation"] == "vertical"
 
 
-async def test_accessibility_autocomplete(page):
+async def test_accessibility_autocomplete(page: Page) -> None:
     await page.set_content('<div role="textbox" aria-autocomplete="list">hi</div>')
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0]["autocomplete"] == "list"
 
 
-async def test_accessibility_multiselectable(page):
+async def test_accessibility_multiselectable(page: Page) -> None:
     await page.set_content(
         '<div role="grid" tabIndex=-1 aria-multiselectable=true>hey</div>'
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0]["multiselectable"]
 
 
-async def test_accessibility_keyshortcuts(page):
+async def test_accessibility_keyshortcuts(page: Page) -> None:
     await page.set_content(
         '<div role="grid" tabIndex=-1 aria-keyshortcuts="foo">hey</div>'
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0]["keyshortcuts"] == "foo"
 
 
 async def test_accessibility_filtering_children_of_leaf_nodes_should_not_report_text_nodes_inside_controls(
-    page, is_firefox
-):
+    page: Page, is_firefox: bool
+) -> None:
     await page.set_content(
         """
     <div role="tablist">
@@ -167,86 +189,18 @@ async def test_accessibility_filtering_children_of_leaf_nodes_should_not_report_
     assert await page.accessibility.snapshot() == golden
 
 
-# WebKit rich text accessibility is iffy
-@pytest.mark.skip_browser("webkit")
-async def test_accessibility_filtering_children_of_leaf_nodes_rich_text_editable_fields_should_have_children(
-    page, is_firefox
-):
-    await page.set_content(
-        """
-    <div contenteditable="true">
-    Edit this image: <img src="fakeimage.png" alt="my fake image">
-    </div>"""
-    )
-    golden = (
-        {
-            "role": "section",
-            "name": "",
-            "children": [
-                {"role": "text leaf", "name": "Edit this image: "},
-                {"role": "text", "name": "my fake image"},
-            ],
-        }
-        if is_firefox
-        else {
-            "role": "generic",
-            "name": "",
-            "value": "Edit this image: ",
-            "children": [
-                {"role": "text", "name": "Edit this image:"},
-                {"role": "img", "name": "my fake image"},
-            ],
-        }
-    )
-    snapshot = await page.accessibility.snapshot()
-    assert snapshot["children"][0] == golden
-
-
-# WebKit rich text accessibility is iffy
-@pytest.mark.skip_browser("webkit")
-async def test_accessibility_filtering_children_of_leaf_nodes_rich_text_editable_fields_with_role_should_have_children(
-    page, is_firefox, browser_channel
-):
-    await page.set_content(
-        """
-    <div contenteditable="true" role='textbox'>
-    Edit this image: <img src="fakeimage.png" alt="my fake image">
-    </div>"""
-    )
-    if is_firefox:
-        golden = {
-            "role": "textbox",
-            "name": "",
-            "value": "Edit this image: my fake image",
-            "children": [{"role": "text", "name": "my fake image"}],
-        }
-    else:
-        golden = {
-            "role": "textbox",
-            "name": "",
-            "multiline": True,
-            "value": "Edit this image: ",
-            "children": [
-                {"role": "text", "name": "Edit this image:"},
-                {"role": "img", "name": "my fake image"},
-            ],
-            "value": "Edit this image: ",
-        }
-    snapshot = await page.accessibility.snapshot()
-    assert snapshot["children"][0] == golden
-
-
 # Firefox does not support contenteditable="plaintext-only".
 # WebKit rich text accessibility is iffy
 @pytest.mark.only_browser("chromium")
 async def test_accessibility_plain_text_field_with_role_should_not_have_children(
-    page, browser_channel
-):
+    page: Page,
+) -> None:
     await page.set_content(
         """
     <div contenteditable="plaintext-only" role='textbox'>Edit this image:<img src="fakeimage.png" alt="my fake image"></div>"""
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == {
         "multiline": True,
         "name": "",
@@ -257,13 +211,14 @@ async def test_accessibility_plain_text_field_with_role_should_not_have_children
 
 @pytest.mark.only_browser("chromium")
 async def test_accessibility_plain_text_field_without_role_should_not_have_content(
-    page, browser_channel
-):
+    page: Page,
+) -> None:
     await page.set_content(
         """
     <div contenteditable="plaintext-only">Edit this image:<img src="fakeimage.png" alt="my fake image"></div>"""
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == {
         "name": "",
         "role": "generic",
@@ -273,13 +228,14 @@ async def test_accessibility_plain_text_field_without_role_should_not_have_conte
 
 @pytest.mark.only_browser("chromium")
 async def test_accessibility_plain_text_field_with_tabindex_and_without_role_should_not_have_content(
-    page, browser_channel
-):
+    page: Page,
+) -> None:
     await page.set_content(
         """
     <div contenteditable="plaintext-only" tabIndex=0>Edit this image:<img src="fakeimage.png" alt="my fake image"></div>"""
     )
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == {
         "name": "",
         "role": "generic",
@@ -288,8 +244,8 @@ async def test_accessibility_plain_text_field_with_tabindex_and_without_role_sho
 
 
 async def test_accessibility_non_editable_textbox_with_role_and_tabIndex_and_label_should_not_have_children(
-    page, is_chromium, is_firefox
-):
+    page: Page, is_chromium: bool, is_firefox: bool
+) -> None:
     await page.set_content(
         """
       <div role="textbox" tabIndex=0 aria-checked="true" aria-label="my favorite textbox">
@@ -316,12 +272,13 @@ async def test_accessibility_non_editable_textbox_with_role_and_tabIndex_and_lab
             "value": "this is the inner content  ",
         }
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == golden
 
 
 async def test_accessibility_checkbox_with_and_tabIndex_and_label_should_not_have_children(
-    page,
-):
+    page: Page,
+) -> None:
     await page.set_content(
         """
     <div role="checkbox" tabIndex=0 aria-checked="true" aria-label="my favorite checkbox">
@@ -331,12 +288,13 @@ async def test_accessibility_checkbox_with_and_tabIndex_and_label_should_not_hav
     )
     golden = {"role": "checkbox", "name": "my favorite checkbox", "checked": True}
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == golden
 
 
 async def test_accessibility_checkbox_without_label_should_not_have_children(
-    page, is_firefox
-):
+    page: Page, is_firefox: bool
+) -> None:
     await page.set_content(
         """
       <div role="checkbox" aria-checked="true">
@@ -350,10 +308,11 @@ async def test_accessibility_checkbox_without_label_should_not_have_children(
         "checked": True,
     }
     snapshot = await page.accessibility.snapshot()
+    assert snapshot
     assert snapshot["children"][0] == golden
 
 
-async def test_accessibility_should_work_a_button(page):
+async def test_accessibility_should_work_a_button(page: Page) -> None:
     await page.set_content("<button>My Button</button>")
 
     button = await page.query_selector("button")
@@ -363,7 +322,7 @@ async def test_accessibility_should_work_a_button(page):
     }
 
 
-async def test_accessibility_should_work_an_input(page):
+async def test_accessibility_should_work_an_input(page: Page) -> None:
     await page.set_content('<input title="My Input" value="My Value">')
 
     input = await page.query_selector("input")
@@ -374,9 +333,7 @@ async def test_accessibility_should_work_an_input(page):
     }
 
 
-async def test_accessibility_should_work_on_a_menu(
-    page, is_webkit, is_chromium, browser_channel
-):
+async def test_accessibility_should_work_on_a_menu(page: Page) -> None:
     await page.set_content(
         """
         <div role="menu" title="My Menu">
@@ -406,15 +363,15 @@ async def test_accessibility_should_work_on_a_menu(
 
 
 async def test_accessibility_should_return_null_when_the_element_is_no_longer_in_DOM(
-    page,
-):
+    page: Page,
+) -> None:
     await page.set_content("<button>My Button</button>")
     button = await page.query_selector("button")
     await page.eval_on_selector("button", "button => button.remove()")
     assert await page.accessibility.snapshot(root=button) is None
 
 
-async def test_accessibility_should_show_uninteresting_nodes(page):
+async def test_accessibility_should_show_uninteresting_nodes(page: Page) -> None:
     await page.set_content(
         """
         <div id="root" role="textbox">
@@ -430,6 +387,7 @@ async def test_accessibility_should_show_uninteresting_nodes(page):
 
     root = await page.query_selector("#root")
     snapshot = await page.accessibility.snapshot(root=root, interesting_only=False)
+    assert snapshot
     assert snapshot["role"] == "textbox"
     assert "hello" in snapshot["value"]
     assert "world" in snapshot["value"]

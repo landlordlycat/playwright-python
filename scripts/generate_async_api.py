@@ -16,14 +16,14 @@
 import inspect
 import re
 from types import FunctionType
-from typing import Any, get_type_hints
+from typing import Any
 
-from playwright._impl._helper import to_snake_case
-from scripts.documentation_provider import DocumentationProvider
-from scripts.generate_api import (
-    all_types,
+from documentation_provider import DocumentationProvider
+from generate_api import (
     api_globals,
     arguments,
+    generated_types,
+    get_type_hints,
     header,
     process_type,
     return_type,
@@ -114,10 +114,7 @@ def generate(t: Any) -> None:
                     get_type_hints(value, api_globals)["return"]
                 )
                 if is_async:
-                    prefix += (
-                        f'await self._async("{to_snake_case(class_name)}.{name}", '
-                    )
-                    suffix += ")"
+                    prefix += "await "
                 prefix = prefix + f"self._impl_obj.{name}("
                 suffix = ")" + suffix
                 print(
@@ -133,9 +130,8 @@ def main() -> None:
     print(
         "from playwright._impl._async_base import AsyncEventContextManager, AsyncBase, AsyncContextManager, mapping"
     )
-    print("NoneType = type(None)")
 
-    for t in all_types:
+    for t in generated_types:
         generate(t)
     documentation_provider.print_remainder()
 

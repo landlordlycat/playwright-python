@@ -14,8 +14,11 @@
 
 import asyncio
 import base64
+import inspect
 import json
+import json as json_utils
 import mimetypes
+import re
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,12 +30,14 @@ from typing import (
     Dict,
     List,
     Optional,
+    TypedDict,
     Union,
     cast,
 )
 from urllib import parse
 
 from playwright._impl._api_structures import (
+    ClientCertificate,
     Headers,
     HeadersArray,
     RemoteAddr,
@@ -40,19 +45,85 @@ from playwright._impl._api_structures import (
     ResourceTiming,
     SecurityDetails,
 )
-from playwright._impl._api_types import Error
 from playwright._impl._connection import (
     ChannelOwner,
     from_channel,
     from_nullable_channel,
 )
+from playwright._impl._errors import Error
 from playwright._impl._event_context_manager import EventContextManagerImpl
-from playwright._impl._helper import ContinueParameters, locals_to_params
-from playwright._impl._wait_helper import WaitHelper
+from playwright._impl._helper import (
+    URLMatch,
+    WebSocketRouteHandlerCallback,
+    async_readfile,
+    locals_to_params,
+    url_matches,
+)
+from playwright._impl._str_utils import escape_regex_flags
+from playwright._impl._waiter import Waiter
 
 if TYPE_CHECKING:  # pragma: no cover
+    from playwright._impl._browser_context import BrowserContext
     from playwright._impl._fetch import APIResponse
     from playwright._impl._frame import Frame
+    from playwright._impl._page import Page
+
+
+class FallbackOverrideParameters(TypedDict, total=False):
+    url: Optional[str]
+    method: Optional[str]
+    headers: Optional[Dict[str, str]]
+    postData: Optional[Union[str, bytes]]
+
+
+class SerializedFallbackOverrides:
+    def __init__(self) -> None:
+        self.url: Optional[str] = None
+        self.method: Optional[str] = None
+        self.headers: Optional[Dict[str, str]] = None
+        self.post_data_buffer: Optional[bytes] = None
+
+
+def serialize_headers(headers: Dict[str, str]) -> HeadersArray:
+    return [
+        {"name": name, "value": value}
+        for name, value in headers.items()
+        if value is not None
+    ]
+
+
+async def to_client_certificates_protocol(
+    clientCertificates: Optional[List[ClientCertificate]],
+) -> Optional[List[Dict[str, str]]]:
+    if not clientCertificates:
+        return None
+    out = []
+    for clientCertificate in clientCertificates:
+        out_record = {
+            "origin": clientCertificate["origin"],
+        }
+        if passphrase := clientCertificate.get("passphrase"):
+            out_record["passphrase"] = passphrase
+        if pfx := clientCertificate.get("pfx"):
+            out_record["pfx"] = base64.b64encode(pfx).decode()
+        if pfx_path := clientCertificate.get("pfxPath"):
+            out_record["pfx"] = base64.b64encode(
+                await async_readfile(pfx_path)
+            ).decode()
+        if cert := clientCertificate.get("cert"):
+            out_record["cert"] = base64.b64encode(cert).decode()
+        if cert_path := clientCertificate.get("certPath"):
+            out_record["cert"] = base64.b64encode(
+                await async_readfile(cert_path)
+            ).decode()
+        if key := clientCertificate.get("key"):
+            out_record["key"] = base64.b64encode(key).decode()
+        if key_path := clientCertificate.get("keyPath"):
+            out_record["key"] = base64.b64encode(
+                await async_readfile(key_path)
+            ).decode()
+        out.append(out_record)
+    return out
 
 
 class Request(ChannelOwner):
@@ -80,13 +151,34 @@ class Request(ChannelOwner):
         }
         self._provisional_headers = RawHeaders(self._initializer["headers"])
         self._all_headers_future: Optional[asyncio.Future[RawHeaders]] = None
+        self._fallback_overrides: SerializedFallbackOverrides = (
+            SerializedFallbackOverrides()
+        )
 
     def __repr__(self) -> str:
         return f"<Request url={self.url!r} method={self.method!r}>"
 
+    def _apply_fallback_overrides(self, overrides: FallbackOverrideParameters) -> None:
+        self._fallback_overrides.url = overrides.get(
+            "url", self._fallback_overrides.url
+        )
+        self._fallback_overrides.method = overrides.get(
+            "method", self._fallback_overrides.method
+        )
+        self._fallback_overrides.headers = overrides.get(
+            "headers", self._fallback_overrides.headers
+        )
+        post_data = overrides.get("postData")
+        if isinstance(post_data, str):
+            self._fallback_overrides.post_data_buffer = post_data.encode()
+        elif isinstance(post_data, bytes):
+            self._fallback_overrides.post_data_buffer = post_data
+        elif post_data is not None:
+            self._fallback_overrides.post_data_buffer = json.dumps(post_data).encode()
+
     @property
     def url(self) -> str:
-        return self._initializer["url"]
+        return cast(str, self._fallback_overrides.url or self._initializer["url"])
 
     @property
     def resource_type(self) -> str:
@@ -94,7 +186,7 @@ class Request(ChannelOwner):
 
     @property
     def method(self) -> str:
-        return self._initializer["method"]
+        return cast(str, self._fallback_overrides.method or self._initializer["method"])
 
     async def sizes(self) -> RequestSizes:
         response = await self.response()
@@ -104,10 +196,13 @@ class Request(ChannelOwner):
 
     @property
     def post_data(self) -> Optional[str]:
-        data = self.post_data_buffer
-        if not data:
-            return None
-        return data.decode()
+        data = self._fallback_overrides.post_data_buffer
+        if data:
+            return data.decode()
+        base64_post_data = self._initializer.get("postData")
+        if base64_post_data is not None:
+            return base64.b64decode(base64_post_data).decode()
+        return None
 
     @property
     def post_data_json(self) -> Optional[Any]:
@@ -115,7 +210,7 @@ class Request(ChannelOwner):
         if not post_data:
             return None
         content_type = self.headers["content-type"]
-        if content_type == "application/x-www-form-urlencoded":
+        if "application/x-www-form-urlencoded" in content_type:
             return dict(parse.parse_qsl(post_data))
         try:
             return json.loads(post_data)
@@ -124,17 +219,31 @@ class Request(ChannelOwner):
 
     @property
     def post_data_buffer(self) -> Optional[bytes]:
-        b64_content = self._initializer.get("postData")
-        if b64_content is None:
-            return None
-        return base64.b64decode(b64_content)
+        if self._fallback_overrides.post_data_buffer:
+            return self._fallback_overrides.post_data_buffer
+        if self._initializer.get("postData"):
+            return base64.b64decode(self._initializer["postData"])
+        return None
 
     async def response(self) -> Optional["Response"]:
         return from_nullable_channel(await self._channel.send("response"))
 
     @property
     def frame(self) -> "Frame":
-        return from_channel(self._initializer["frame"])
+        if not self._initializer.get("frame"):
+            raise Error("Service Worker requests do not have an associated frame.")
+        frame = cast("Frame", from_channel(self._initializer["frame"]))
+        if not frame._page:
+            raise Error(
+                "\n".join(
+                    [
+                        "Frame for this navigation request is not available, because the request",
+                        "was issued before the frame is created. You can check whether the request",
+                        "is a navigation request by calling isNavigationRequest() method.",
+                    ]
+                )
+            )
+        return frame
 
     def is_navigation_request(self) -> bool:
         return self._initializer["isNavigationRequest"]
@@ -155,8 +264,16 @@ class Request(ChannelOwner):
     def timing(self) -> ResourceTiming:
         return self._timing
 
+    def _set_response_end_timing(self, response_end_timing: float) -> None:
+        self._timing["responseEnd"] = response_end_timing
+        if self._timing["responseStart"] == -1:
+            self._timing["responseStart"] = response_end_timing
+
     @property
     def headers(self) -> Headers:
+        override = self._fallback_overrides.headers
+        if override:
+            return RawHeaders._from_headers_dict_lossy(override).headers()
         return self._provisional_headers.headers()
 
     async def all_headers(self) -> Headers:
@@ -169,11 +286,31 @@ class Request(ChannelOwner):
         return (await self._actual_headers()).get(name)
 
     async def _actual_headers(self) -> "RawHeaders":
+        override = self._fallback_overrides.headers
+        if override:
+            return RawHeaders(serialize_headers(override))
         if not self._all_headers_future:
             self._all_headers_future = asyncio.Future()
             headers = await self._channel.send("rawRequestHeaders")
             self._all_headers_future.set_result(RawHeaders(headers))
         return await self._all_headers_future
+
+    def _target_closed_future(self) -> asyncio.Future:
+        frame = cast(
+            Optional["Frame"], from_nullable_channel(self._initializer.get("frame"))
+        )
+        if not frame:
+            return asyncio.Future()
+        page = frame._page
+        if not page:
+            return asyncio.Future()
+        return page._closed_or_crashed_future
+
+    def _safe_page(self) -> "Optional[Page]":
+        frame = from_nullable_channel(self._initializer.get("frame"))
+        if not frame:
+            return None
+        return cast("Frame", frame)._page
 
 
 class Route(ChannelOwner):
@@ -181,6 +318,24 @@ class Route(ChannelOwner):
         self, parent: ChannelOwner, type: str, guid: str, initializer: Dict
     ) -> None:
         super().__init__(parent, type, guid, initializer)
+        self._channel.mark_as_internal_type()
+        self._handling_future: Optional[asyncio.Future["bool"]] = None
+        self._context: "BrowserContext" = cast("BrowserContext", None)
+        self._did_throw = False
+
+    def _start_handling(self) -> "asyncio.Future[bool]":
+        self._handling_future = asyncio.Future()
+        return self._handling_future
+
+    def _report_handled(self, done: bool) -> None:
+        chain = self._handling_future
+        assert chain
+        self._handling_future = None
+        chain.set_result(done)
+
+    def _check_not_handled(self) -> None:
+        if not self._handling_future:
+            raise Error("Route is already handled!")
 
     def __repr__(self) -> str:
         return f"<Route request={self.request}>"
@@ -190,8 +345,15 @@ class Route(ChannelOwner):
         return from_channel(self._initializer["request"])
 
     async def abort(self, errorCode: str = None) -> None:
-        await self._race_with_page_close(
-            self._channel.send("abort", locals_to_params(locals()))
+        await self._handle_route(
+            lambda: self._race_with_page_close(
+                self._channel.send(
+                    "abort",
+                    {
+                        "errorCode": errorCode,
+                    },
+                )
+            )
         )
 
     async def fulfill(
@@ -199,11 +361,34 @@ class Route(ChannelOwner):
         status: int = None,
         headers: Dict[str, str] = None,
         body: Union[str, bytes] = None,
+        json: Any = None,
+        path: Union[str, Path] = None,
+        contentType: str = None,
+        response: "APIResponse" = None,
+    ) -> None:
+        await self._handle_route(
+            lambda: self._inner_fulfill(
+                status, headers, body, json, path, contentType, response
+            )
+        )
+
+    async def _inner_fulfill(
+        self,
+        status: int = None,
+        headers: Dict[str, str] = None,
+        body: Union[str, bytes] = None,
+        json: Any = None,
         path: Union[str, Path] = None,
         contentType: str = None,
         response: "APIResponse" = None,
     ) -> None:
         params = locals_to_params(locals())
+
+        if json is not None:
+            if body is not None:
+                raise Error("Can specify either body or json parameters")
+            body = json_utils.dumps(json)
+
         if response:
             del params["response"]
             params["status"] = (
@@ -239,6 +424,8 @@ class Route(ChannelOwner):
         headers = {k.lower(): str(v) for k, v in params.get("headers", {}).items()}
         if params.get("contentType"):
             headers["content-type"] = params["contentType"]
+        elif json:
+            headers["content-type"] = "application/json"
         elif path:
             headers["content-type"] = (
                 mimetypes.guess_type(str(Path(path)))[0] or "application/octet-stream"
@@ -246,54 +433,333 @@ class Route(ChannelOwner):
         if length and "content-length" not in headers:
             headers["content-length"] = str(length)
         params["headers"] = serialize_headers(headers)
+
         await self._race_with_page_close(self._channel.send("fulfill", params))
+
+    async def _handle_route(self, callback: Callable) -> None:
+        self._check_not_handled()
+        try:
+            await callback()
+            self._report_handled(True)
+        except Exception as e:
+            self._did_throw = True
+            raise e
+
+    async def fetch(
+        self,
+        url: str = None,
+        method: str = None,
+        headers: Dict[str, str] = None,
+        postData: Union[Any, str, bytes] = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
+        timeout: float = None,
+    ) -> "APIResponse":
+        return await self._connection.wrap_api_call(
+            lambda: self._context.request._inner_fetch(
+                self.request,
+                url,
+                method,
+                headers,
+                postData,
+                maxRedirects=maxRedirects,
+                maxRetries=maxRetries,
+                timeout=timeout,
+            )
+        )
+
+    async def fallback(
+        self,
+        url: str = None,
+        method: str = None,
+        headers: Dict[str, str] = None,
+        postData: Union[Any, str, bytes] = None,
+    ) -> None:
+        overrides = cast(FallbackOverrideParameters, locals_to_params(locals()))
+        self._check_not_handled()
+        self.request._apply_fallback_overrides(overrides)
+        self._report_handled(False)
 
     async def continue_(
         self,
         url: str = None,
         method: str = None,
         headers: Dict[str, str] = None,
-        postData: Union[str, bytes] = None,
+        postData: Union[Any, str, bytes] = None,
     ) -> None:
-        overrides: ContinueParameters = {}
-        if url:
-            overrides["url"] = url
-        if method:
-            overrides["method"] = method
-        if headers:
-            overrides["headers"] = serialize_headers(headers)
-        if isinstance(postData, str):
-            overrides["postData"] = base64.b64encode(postData.encode()).decode()
-        elif isinstance(postData, bytes):
-            overrides["postData"] = base64.b64encode(postData).decode()
+        overrides = cast(FallbackOverrideParameters, locals_to_params(locals()))
+
+        async def _inner() -> None:
+            self.request._apply_fallback_overrides(overrides)
+            await self._inner_continue(False)
+
+        return await self._handle_route(_inner)
+
+    async def _inner_continue(self, is_fallback: bool = False) -> None:
+        options = self.request._fallback_overrides
         await self._race_with_page_close(
-            self._channel.send("continue", cast(Any, overrides))
+            self._channel.send(
+                "continue",
+                {
+                    "url": options.url,
+                    "method": options.method,
+                    "headers": (
+                        serialize_headers(options.headers) if options.headers else None
+                    ),
+                    "postData": (
+                        base64.b64encode(options.post_data_buffer).decode()
+                        if options.post_data_buffer is not None
+                        else None
+                    ),
+                    "isFallback": is_fallback,
+                },
+            )
         )
 
-    def _internal_continue(self) -> None:
-        async def continue_route() -> None:
-            try:
-                await self.continue_()
-            except Exception:
-                pass
-
-        asyncio.create_task(continue_route())
+    async def _redirected_navigation_request(self, url: str) -> None:
+        await self._handle_route(
+            lambda: self._race_with_page_close(
+                self._channel.send("redirectNavigationRequest", {"url": url})
+            )
+        )
 
     async def _race_with_page_close(self, future: Coroutine) -> None:
-        if hasattr(self.request.frame, "_page"):
-            page = self.request.frame._page
-            # When page closes or crashes, we catch any potential rejects from this Route.
-            # Note that page could be missing when routing popup's initial request that
-            # does not have a Page initialized just yet.
-            fut = asyncio.create_task(future)
-            await asyncio.wait(
-                [fut, page._closed_or_crashed_future],
-                return_when=asyncio.FIRST_COMPLETED,
+        fut = asyncio.create_task(future)
+        # Rewrite the user's stack to the new task which runs in the background.
+        setattr(
+            fut,
+            "__pw_stack__",
+            getattr(asyncio.current_task(self._loop), "__pw_stack__", inspect.stack()),
+        )
+        target_closed_future = self.request._target_closed_future()
+        await asyncio.wait(
+            [fut, target_closed_future],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if fut.done() and fut.exception():
+            raise cast(BaseException, fut.exception())
+        if target_closed_future.done():
+            await asyncio.gather(fut, return_exceptions=True)
+
+
+def _create_task_and_ignore_exception(
+    loop: asyncio.AbstractEventLoop, coro: Coroutine
+) -> None:
+    async def _ignore_exception() -> None:
+        try:
+            await coro
+        except Exception:
+            pass
+
+    loop.create_task(_ignore_exception())
+
+
+class ServerWebSocketRoute:
+    def __init__(self, ws: "WebSocketRoute"):
+        self._ws = ws
+
+    def on_message(self, handler: Callable[[Union[str, bytes]], Any]) -> None:
+        self._ws._on_server_message = handler
+
+    def on_close(self, handler: Callable[[Optional[int], Optional[str]], Any]) -> None:
+        self._ws._on_server_close = handler
+
+    def connect_to_server(self) -> None:
+        raise NotImplementedError(
+            "connectToServer must be called on the page-side WebSocketRoute"
+        )
+
+    @property
+    def url(self) -> str:
+        return self._ws._initializer["url"]
+
+    def close(self, code: int = None, reason: str = None) -> None:
+        _create_task_and_ignore_exception(
+            self._ws._loop,
+            self._ws._channel.send(
+                "closeServer",
+                {
+                    "code": code,
+                    "reason": reason,
+                    "wasClean": True,
+                },
+            ),
+        )
+
+    def send(self, message: Union[str, bytes]) -> None:
+        if isinstance(message, str):
+            _create_task_and_ignore_exception(
+                self._ws._loop,
+                self._ws._channel.send(
+                    "sendToServer", {"message": message, "isBase64": False}
+                ),
             )
-            if page._closed_or_crashed_future.done():
-                await asyncio.gather(fut, return_exceptions=True)
         else:
-            await future
+            _create_task_and_ignore_exception(
+                self._ws._loop,
+                self._ws._channel.send(
+                    "sendToServer",
+                    {"message": base64.b64encode(message).decode(), "isBase64": True},
+                ),
+            )
+
+
+class WebSocketRoute(ChannelOwner):
+    def __init__(
+        self, parent: ChannelOwner, type: str, guid: str, initializer: Dict
+    ) -> None:
+        super().__init__(parent, type, guid, initializer)
+        self._channel.mark_as_internal_type()
+        self._on_page_message: Optional[Callable[[Union[str, bytes]], Any]] = None
+        self._on_page_close: Optional[Callable[[Optional[int], Optional[str]], Any]] = (
+            None
+        )
+        self._on_server_message: Optional[Callable[[Union[str, bytes]], Any]] = None
+        self._on_server_close: Optional[
+            Callable[[Optional[int], Optional[str]], Any]
+        ] = None
+        self._server = ServerWebSocketRoute(self)
+        self._connected = False
+
+        self._channel.on("messageFromPage", self._channel_message_from_page)
+        self._channel.on("messageFromServer", self._channel_message_from_server)
+        self._channel.on("closePage", self._channel_close_page)
+        self._channel.on("closeServer", self._channel_close_server)
+
+    def _channel_message_from_page(self, event: Dict) -> None:
+        if self._on_page_message:
+            self._on_page_message(
+                base64.b64decode(event["message"])
+                if event["isBase64"]
+                else event["message"]
+            )
+        elif self._connected:
+            _create_task_and_ignore_exception(
+                self._loop, self._channel.send("sendToServer", event)
+            )
+
+    def _channel_message_from_server(self, event: Dict) -> None:
+        if self._on_server_message:
+            self._on_server_message(
+                base64.b64decode(event["message"])
+                if event["isBase64"]
+                else event["message"]
+            )
+        else:
+            _create_task_and_ignore_exception(
+                self._loop, self._channel.send("sendToPage", event)
+            )
+
+    def _channel_close_page(self, event: Dict) -> None:
+        if self._on_page_close:
+            self._on_page_close(event["code"], event["reason"])
+        else:
+            _create_task_and_ignore_exception(
+                self._loop, self._channel.send("closeServer", event)
+            )
+
+    def _channel_close_server(self, event: Dict) -> None:
+        if self._on_server_close:
+            self._on_server_close(event["code"], event["reason"])
+        else:
+            _create_task_and_ignore_exception(
+                self._loop, self._channel.send("closePage", event)
+            )
+
+    @property
+    def url(self) -> str:
+        return self._initializer["url"]
+
+    async def close(self, code: int = None, reason: str = None) -> None:
+        try:
+            await self._channel.send(
+                "closePage", {"code": code, "reason": reason, "wasClean": True}
+            )
+        except Exception:
+            pass
+
+    def connect_to_server(self) -> "WebSocketRoute":
+        if self._connected:
+            raise Error("Already connected to the server")
+        self._connected = True
+        asyncio.create_task(self._channel.send("connect"))
+        return cast("WebSocketRoute", self._server)
+
+    def send(self, message: Union[str, bytes]) -> None:
+        if isinstance(message, str):
+            _create_task_and_ignore_exception(
+                self._loop,
+                self._channel.send(
+                    "sendToPage", {"message": message, "isBase64": False}
+                ),
+            )
+        else:
+            _create_task_and_ignore_exception(
+                self._loop,
+                self._channel.send(
+                    "sendToPage",
+                    {
+                        "message": base64.b64encode(message).decode(),
+                        "isBase64": True,
+                    },
+                ),
+            )
+
+    def on_message(self, handler: Callable[[Union[str, bytes]], Any]) -> None:
+        self._on_page_message = handler
+
+    def on_close(self, handler: Callable[[Optional[int], Optional[str]], Any]) -> None:
+        self._on_page_close = handler
+
+    async def _after_handle(self) -> None:
+        if self._connected:
+            return
+        # Ensure that websocket is "open" and can send messages without an actual server connection.
+        await self._channel.send("ensureOpened")
+
+
+class WebSocketRouteHandler:
+    def __init__(
+        self,
+        base_url: Optional[str],
+        url: URLMatch,
+        handler: WebSocketRouteHandlerCallback,
+    ):
+        self._base_url = base_url
+        self.url = url
+        self.handler = handler
+
+    @staticmethod
+    def prepare_interception_patterns(
+        handlers: List["WebSocketRouteHandler"],
+    ) -> List[dict]:
+        patterns = []
+        all_urls = False
+        for handler in handlers:
+            if isinstance(handler.url, str):
+                patterns.append({"glob": handler.url})
+            elif isinstance(handler.url, re.Pattern):
+                patterns.append(
+                    {
+                        "regexSource": handler.url.pattern,
+                        "regexFlags": escape_regex_flags(handler.url),
+                    }
+                )
+            else:
+                all_urls = True
+
+        if all_urls:
+            return [{"glob": "**/*"}]
+        return patterns
+
+    def matches(self, ws_url: str) -> bool:
+        return url_matches(self._base_url, ws_url, self.url)
+
+    async def handle(self, websocket_route: "WebSocketRoute") -> None:
+        coro_or_future = self.handler(websocket_route)
+        if asyncio.iscoroutine(coro_or_future):
+            await coro_or_future
+        await websocket_route._after_handle()
 
 
 class Response(ChannelOwner):
@@ -343,6 +809,10 @@ class Response(ChannelOwner):
     def headers(self) -> Headers:
         return self._provisional_headers.headers()
 
+    @property
+    def from_service_worker(self) -> bool:
+        return self._initializer["fromServiceWorker"]
+
     async def all_headers(self) -> Headers:
         return (await self._actual_headers()).headers()
 
@@ -369,7 +839,20 @@ class Response(ChannelOwner):
         return await self._channel.send("securityDetails")
 
     async def finished(self) -> None:
-        await self._finished_future
+        async def on_finished() -> None:
+            await self._request._target_closed_future()
+            raise Error("Target closed")
+
+        on_finished_task = asyncio.create_task(on_finished())
+        await asyncio.wait(
+            cast(
+                List[Union[asyncio.Task, asyncio.Future]],
+                [self._finished_future, on_finished_task],
+            ),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if on_finished_task.done():
+            await on_finished_task
 
     async def body(self) -> bytes:
         binary = await self._channel.send("body")
@@ -392,7 +875,6 @@ class Response(ChannelOwner):
 
 
 class WebSocket(ChannelOwner):
-
     Events = SimpleNamespace(
         Close="close",
         FrameReceived="framereceived",
@@ -405,6 +887,7 @@ class WebSocket(ChannelOwner):
     ) -> None:
         super().__init__(parent, type, guid, initializer)
         self._is_closed = False
+        self._page = cast("Page", parent)
         self._channel.on(
             "frameSent",
             lambda params: self._on_frame_sent(params["opcode"], params["data"]),
@@ -434,22 +917,20 @@ class WebSocket(ChannelOwner):
     ) -> EventContextManagerImpl:
         if timeout is None:
             timeout = cast(Any, self._parent)._timeout_settings.timeout()
-        wait_helper = WaitHelper(self, f"web_socket.expect_event({event})")
-        wait_helper.reject_on_timeout(
+        waiter = Waiter(self, f"web_socket.expect_event({event})")
+        waiter.reject_on_timeout(
             cast(float, timeout),
             f'Timeout {timeout}ms exceeded while waiting for event "{event}"',
         )
         if event != WebSocket.Events.Close:
-            wait_helper.reject_on_event(
-                self, WebSocket.Events.Close, Error("Socket closed")
-            )
+            waiter.reject_on_event(self, WebSocket.Events.Close, Error("Socket closed"))
         if event != WebSocket.Events.Error:
-            wait_helper.reject_on_event(
-                self, WebSocket.Events.Error, Error("Socket error")
-            )
-        wait_helper.reject_on_event(self._parent, "close", Error("Page closed"))
-        wait_helper.wait_for_event(self, event, predicate)
-        return EventContextManagerImpl(wait_helper.result())
+            waiter.reject_on_event(self, WebSocket.Events.Error, Error("Socket error"))
+        waiter.reject_on_event(
+            self._page, "close", lambda: self._page._close_error_with_reason()
+        )
+        waiter.wait_for_event(self, event, predicate)
+        return EventContextManagerImpl(waiter.result())
 
     async def wait_for_event(
         self, event: str, predicate: Callable = None, timeout: float = None
@@ -478,16 +959,16 @@ class WebSocket(ChannelOwner):
         self.emit(WebSocket.Events.Close, self)
 
 
-def serialize_headers(headers: Dict[str, str]) -> HeadersArray:
-    return [{"name": name, "value": value} for name, value in headers.items()]
-
-
 class RawHeaders:
     def __init__(self, headers: HeadersArray) -> None:
         self._headers_array = headers
         self._headers_map: Dict[str, Dict[str, bool]] = defaultdict(dict)
         for header in headers:
             self._headers_map[header["name"].lower()][header["value"]] = True
+
+    @staticmethod
+    def _from_headers_dict_lossy(headers: Dict[str, str]) -> "RawHeaders":
+        return RawHeaders(serialize_headers(headers))
 
     def get(self, name: str) -> Optional[str]:
         values = self.get_all(name)

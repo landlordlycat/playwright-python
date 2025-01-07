@@ -12,38 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import inspect
 import os
 import sys
 from pathlib import Path
+from typing import Tuple
 
 import playwright
 from playwright._repo_version import version
 
 
-def compute_driver_executable() -> Path:
-    package_path = Path(inspect.getfile(playwright)).parent
-    platform = sys.platform
-    if platform == "win32":
-        return package_path / "driver" / "playwright.cmd"
-    return package_path / "driver" / "playwright.sh"
-
-
-if sys.version_info.major == 3 and sys.version_info.minor == 7:
+def compute_driver_executable() -> Tuple[str, str]:
+    driver_path = Path(inspect.getfile(playwright)).parent / "driver"
+    cli_path = str(driver_path / "package" / "cli.js")
     if sys.platform == "win32":
-        # Use ProactorEventLoop in 3.7, which is default in 3.8
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    else:
-        # Prevent Python 3.7 from throwing on Linux:
-        # RuntimeError: Cannot add child handler, the child watcher does not have a loop attached
-        asyncio.get_event_loop()
-        try:
-            asyncio.get_child_watcher()
-        except Exception:
-            # uvloop does not support child watcher
-            # see https://github.com/microsoft/playwright-python/issues/582
-            pass
+        return (
+            os.getenv("PLAYWRIGHT_NODEJS_PATH", str(driver_path / "node.exe")),
+            cli_path,
+        )
+    return (os.getenv("PLAYWRIGHT_NODEJS_PATH", str(driver_path / "node")), cli_path)
 
 
 def get_driver_env() -> dict:

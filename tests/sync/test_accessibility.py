@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http:#www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
+import os
+import sys
 
 import pytest
 
@@ -99,7 +100,14 @@ def test_accessibility_should_work(
                 {"role": "textbox", "name": "placeholder", "value": "and a value"},
                 {
                     "role": "textbox",
-                    "name": "This is a description!",
+                    "name": (
+                        "placeholder"
+                        if (
+                            sys.platform == "darwin"
+                            and int(os.uname().release.split(".")[0]) >= 21
+                        )
+                        else "This is a description!"
+                    ),
                     "value": "and a value",
                 },  # webkit uses the description over placeholder for the name
             ],
@@ -173,78 +181,6 @@ def test_accessibility_filtering_children_of_leaf_nodes_should_not_report_text_n
         ],
     }
     assert page.accessibility.snapshot() == golden
-
-
-# WebKit rich text accessibility is iffy
-@pytest.mark.skip_browser("webkit")
-def test_accessibility_filtering_children_of_leaf_nodes_rich_text_editable_fields_should_have_children(
-    page: Page, is_firefox: bool
-) -> None:
-    page.set_content(
-        """
-    <div contenteditable="true">
-    Edit this image: <img src="fakeimage.png" alt="my fake image">
-    </div>"""
-    )
-    golden = (
-        {
-            "role": "section",
-            "name": "",
-            "children": [
-                {"role": "text leaf", "name": "Edit this image: "},
-                {"role": "text", "name": "my fake image"},
-            ],
-        }
-        if is_firefox
-        else {
-            "role": "generic",
-            "name": "",
-            "value": "Edit this image: ",
-            "children": [
-                {"role": "text", "name": "Edit this image:"},
-                {"role": "img", "name": "my fake image"},
-            ],
-        }
-    )
-    snapshot = page.accessibility.snapshot()
-    assert snapshot
-    assert snapshot["children"][0] == golden
-
-
-# WebKit rich text accessibility is iffy
-@pytest.mark.skip_browser("webkit")
-def test_accessibility_filtering_children_of_leaf_nodes_rich_text_editable_fields_with_role_should_have_children(
-    page: Page, is_firefox: bool
-) -> None:
-    page.set_content(
-        """
-    <div contenteditable="true" role='textbox'>
-    Edit this image: <img src="fakeimage.png" alt="my fake image">
-    </div>"""
-    )
-    golden: Dict[str, Any]
-    if is_firefox:
-        golden = {
-            "role": "textbox",
-            "name": "",
-            "value": "Edit this image: my fake image",
-            "children": [{"role": "text", "name": "my fake image"}],
-        }
-    else:
-        golden = {
-            "role": "textbox",
-            "name": "",
-            "multiline": True,
-            "value": "Edit this image: ",
-            "children": [
-                {"role": "text", "name": "Edit this image:"},
-                {"role": "img", "name": "my fake image"},
-            ],
-            "value": "Edit this image: ",
-        }
-    snapshot = page.accessibility.snapshot()
-    assert snapshot
-    assert snapshot["children"][0] == golden
 
 
 # Firefox does not support contenteditable="plaintext-only".

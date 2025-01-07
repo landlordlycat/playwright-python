@@ -402,6 +402,7 @@ def test_should_timeout_waiting_for_visible(page: Page) -> None:
     with pytest.raises(Error) as exc_info:
         div.scroll_into_view_if_needed(timeout=3000)
     assert "element is not visible" in exc_info.value.message
+    assert "retrying scroll into view action" in exc_info.value.message
 
 
 def test_fill_input(page: Page, server: Server) -> None:
@@ -421,26 +422,30 @@ def test_fill_input_when_Node_is_removed(page: Page, server: Server) -> None:
     assert page.evaluate("result") == "some value"
 
 
-def test_select_textarea(page: Page, server: Server, is_firefox: bool) -> None:
+def test_select_textarea(
+    page: Page, server: Server, is_firefox: bool, is_webkit: bool
+) -> None:
     page.goto(server.PREFIX + "/input/textarea.html")
     textarea = page.query_selector("textarea")
     assert textarea
     textarea.evaluate('textarea => textarea.value = "some value"')
     textarea.select_text()
-    if is_firefox:
+    if is_firefox or is_webkit:
         assert textarea.evaluate("el => el.selectionStart") == 0
         assert textarea.evaluate("el => el.selectionEnd") == 10
     else:
         assert page.evaluate("() => window.getSelection().toString()") == "some value"
 
 
-def test_select_input(page: Page, server: Server, is_firefox: bool) -> None:
+def test_select_input(
+    page: Page, server: Server, is_firefox: bool, is_webkit: bool
+) -> None:
     page.goto(server.PREFIX + "/input/textarea.html")
     input = page.query_selector("input")
     assert input
     input.evaluate('input => input.value = "some value"')
     input.select_text()
-    if is_firefox:
+    if is_firefox or is_webkit:
         assert input.evaluate("el => el.selectionStart") == 0
         assert input.evaluate("el => el.selectionEnd") == 10
     else:
@@ -656,3 +661,11 @@ def test_set_checked(page: Page) -> None:
     assert page.evaluate("checkbox.checked")
     input.set_checked(False)
     assert page.evaluate("checkbox.checked") is False
+
+
+def test_should_allow_disposing_twice(page: Page) -> None:
+    page.set_content("<section>39</section>")
+    element = page.query_selector("section")
+    assert element
+    element.dispose()
+    element.dispose()

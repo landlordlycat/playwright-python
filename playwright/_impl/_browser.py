@@ -12,32 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Dict, List, Union, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Pattern, Sequence, Union, cast
 
 from playwright._impl._api_structures import (
+    ClientCertificate,
     Geolocation,
     HttpCredentials,
     ProxySettings,
     StorageState,
     ViewportSize,
 )
+from playwright._impl._artifact import Artifact
 from playwright._impl._browser_context import BrowserContext
 from playwright._impl._cdp_session import CDPSession
 from playwright._impl._connection import ChannelOwner, from_channel
+from playwright._impl._errors import is_target_closed_error
 from playwright._impl._helper import (
     ColorScheme,
     ForcedColors,
+    HarContentPolicy,
+    HarMode,
     ReducedMotion,
+    ServiceWorkersPolicy,
     async_readfile,
-    is_safe_close_error,
     locals_to_params,
+    make_dirs_for_file,
+    prepare_record_har_options,
 )
-from playwright._impl._local_utils import LocalUtils
-from playwright._impl._network import serialize_headers
+from playwright._impl._network import serialize_headers, to_client_certificates_protocol
 from playwright._impl._page import Page
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -45,7 +50,6 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 class Browser(ChannelOwner):
-
     Events = SimpleNamespace(
         Disconnected="disconnected",
     )
@@ -56,12 +60,12 @@ class Browser(ChannelOwner):
         super().__init__(parent, type, guid, initializer)
         self._browser_type = parent
         self._is_connected = True
-        self._is_closed_or_closing = False
         self._should_close_connection_on_close = False
+        self._cr_tracing_path: Optional[str] = None
 
         self._contexts: List[BrowserContext] = []
-        _utils: LocalUtils
         self._channel.on("close", lambda _: self._on_close())
+        self._close_reason: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"<Browser type={self._browser_type} version={self.version}>"
@@ -69,11 +73,14 @@ class Browser(ChannelOwner):
     def _on_close(self) -> None:
         self._is_connected = False
         self.emit(Browser.Events.Disconnected, self)
-        self._is_closed_or_closing = True
 
     @property
     def contexts(self) -> List[BrowserContext]:
         return self._contexts.copy()
+
+    @property
+    def browser_type(self) -> "BrowserType":
+        return self._browser_type
 
     def is_connected(self) -> bool:
         return self._is_connected
@@ -90,7 +97,7 @@ class Browser(ChannelOwner):
         locale: str = None,
         timezoneId: str = None,
         geolocation: Geolocation = None,
-        permissions: List[str] = None,
+        permissions: Sequence[str] = None,
         extraHTTPHeaders: Dict[str, str] = None,
         offline: bool = None,
         httpCredentials: HttpCredentials = None,
@@ -110,16 +117,18 @@ class Browser(ChannelOwner):
         storageState: Union[StorageState, str, Path] = None,
         baseURL: str = None,
         strictSelectors: bool = None,
+        serviceWorkers: ServiceWorkersPolicy = None,
+        recordHarUrlFilter: Union[Pattern[str], str] = None,
+        recordHarMode: HarMode = None,
+        recordHarContent: HarContentPolicy = None,
+        clientCertificates: List[ClientCertificate] = None,
     ) -> BrowserContext:
         params = locals_to_params(locals())
-        await normalize_context_params(self._connection._is_sync, params)
+        await prepare_browser_context_params(params)
 
         channel = await self._channel.send("newContext", params)
         context = cast(BrowserContext, from_channel(channel))
-        self._contexts.append(context)
-        context._browser = self
-        context._options = params
-        context._tracing._local_utils = self._local_utils
+        self._browser_type._did_create_context(context, params, {})
         return context
 
     async def new_page(
@@ -134,7 +143,7 @@ class Browser(ChannelOwner):
         locale: str = None,
         timezoneId: str = None,
         geolocation: Geolocation = None,
-        permissions: List[str] = None,
+        permissions: Sequence[str] = None,
         extraHTTPHeaders: Dict[str, str] = None,
         offline: bool = None,
         httpCredentials: HttpCredentials = None,
@@ -154,25 +163,33 @@ class Browser(ChannelOwner):
         storageState: Union[StorageState, str, Path] = None,
         baseURL: str = None,
         strictSelectors: bool = None,
+        serviceWorkers: ServiceWorkersPolicy = None,
+        recordHarUrlFilter: Union[Pattern[str], str] = None,
+        recordHarMode: HarMode = None,
+        recordHarContent: HarContentPolicy = None,
+        clientCertificates: List[ClientCertificate] = None,
     ) -> Page:
         params = locals_to_params(locals())
-        context = await self.new_context(**params)
-        page = await context.new_page()
-        page._owned_context = context
-        context._owner_page = page
-        return page
 
-    async def close(self) -> None:
-        if self._is_closed_or_closing:
-            return
-        self._is_closed_or_closing = True
+        async def inner() -> Page:
+            context = await self.new_context(**params)
+            page = await context.new_page()
+            page._owned_context = context
+            context._owner_page = page
+            return page
+
+        return await self._connection.wrap_api_call(inner)
+
+    async def close(self, reason: str = None) -> None:
+        self._close_reason = reason
         try:
-            await self._channel.send("close")
+            if self._should_close_connection_on_close:
+                await self._connection.stop_async()
+            else:
+                await self._channel.send("close", {"reason": reason})
         except Exception as e:
-            if not is_safe_close_error(e):
+            if not is_target_closed_error(e):
                 raise e
-        if self._should_close_connection_on_close:
-            await self._connection.stop_async()
 
     @property
     def version(self) -> str:
@@ -186,21 +203,29 @@ class Browser(ChannelOwner):
         page: Page = None,
         path: Union[str, Path] = None,
         screenshots: bool = None,
-        categories: List[str] = None,
+        categories: Sequence[str] = None,
     ) -> None:
         params = locals_to_params(locals())
         if page:
             params["page"] = page._channel
         if path:
+            self._cr_tracing_path = str(path)
             params["path"] = str(path)
         await self._channel.send("startTracing", params)
 
     async def stop_tracing(self) -> bytes:
-        encoded_binary = await self._channel.send("stopTracing")
-        return base64.b64decode(encoded_binary)
+        artifact = cast(Artifact, from_channel(await self._channel.send("stopTracing")))
+        buffer = await artifact.read_info_buffer()
+        await artifact.delete()
+        if self._cr_tracing_path:
+            make_dirs_for_file(self._cr_tracing_path)
+            with open(self._cr_tracing_path, "wb") as f:
+                f.write(buffer)
+            self._cr_tracing_path = None
+        return buffer
 
 
-async def normalize_context_params(is_sync: bool, params: Dict) -> None:
+async def prepare_browser_context_params(params: Dict) -> None:
     if params.get("noViewport"):
         del params["noViewport"]
         params["noDefaultViewport"] = True
@@ -209,14 +234,10 @@ async def normalize_context_params(is_sync: bool, params: Dict) -> None:
     if "extraHTTPHeaders" in params:
         params["extraHTTPHeaders"] = serialize_headers(params["extraHTTPHeaders"])
     if "recordHarPath" in params:
-        recordHar: Dict[str, Any] = {"path": str(params["recordHarPath"])}
-        params["recordHar"] = recordHar
-        if "recordHarOmitContent" in params:
-            params["recordHar"]["omitContent"] = params["recordHarOmitContent"]
-            del params["recordHarOmitContent"]
+        params["recordHar"] = prepare_record_har_options(params)
         del params["recordHarPath"]
     if "recordVideoDir" in params:
-        params["recordVideo"] = {"dir": str(params["recordVideoDir"])}
+        params["recordVideo"] = {"dir": Path(params["recordVideoDir"]).absolute()}
         if "recordVideoSize" in params:
             params["recordVideo"]["size"] = params["recordVideoSize"]
             del params["recordVideoSize"]
@@ -227,3 +248,16 @@ async def normalize_context_params(is_sync: bool, params: Dict) -> None:
             params["storageState"] = json.loads(
                 (await async_readfile(storageState)).decode()
             )
+    if params.get("colorScheme", None) == "null":
+        params["colorScheme"] = "no-override"
+    if params.get("reducedMotion", None) == "null":
+        params["reducedMotion"] = "no-override"
+    if params.get("forcedColors", None) == "null":
+        params["forcedColors"] = "no-override"
+    if "acceptDownloads" in params:
+        params["acceptDownloads"] = "accept" if params["acceptDownloads"] else "deny"
+
+    if "clientCertificates" in params:
+        params["clientCertificates"] = await to_client_certificates_protocol(
+            params["clientCertificates"]
+        )

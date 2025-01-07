@@ -15,17 +15,15 @@ source ./env/bin/activate
 Install required dependencies:
 
 ```sh
-python -m pip install --upgrade pip wheel
+python -m pip install --upgrade pip
 pip install -r local-requirements.txt
 ```
 
 Build and install drivers:
 
 ```sh
-pip install -e.
-python setup.py bdist_wheel
-# For all platforms
-python setup.py bdist_wheel --all
+pip install -e .
+python -m build --wheel
 ```
 
 Run tests:
@@ -47,7 +45,7 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-For more details look at the [CI configuration](./blob/main/.github/workflows/ci.yml).
+For more details look at the [CI configuration](./.github/workflows/ci.yml).
 
 Collect coverage
 

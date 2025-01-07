@@ -18,10 +18,10 @@ Firefox and WebKit with a single API. Playwright is built to enable cross-browse
 web automation that is ever-green, capable, reliable and fast.
 """
 
-from typing import Union, overload
+from typing import Any, Optional, Union, overload
 
 import playwright._impl._api_structures
-import playwright._impl._api_types
+import playwright._impl._errors
 import playwright.async_api._generated
 from playwright._impl._assertions import (
     APIResponseAssertions as APIResponseAssertionsImpl,
@@ -45,6 +45,7 @@ from playwright.async_api._generated import (
     ElementHandle,
     FileChooser,
     Frame,
+    FrameLocator,
     JSHandle,
     Keyboard,
     Locator,
@@ -60,6 +61,7 @@ from playwright.async_api._generated import (
     Touchscreen,
     Video,
     WebSocket,
+    WebSocketRoute,
     Worker,
 )
 
@@ -78,39 +80,69 @@ SourceLocation = playwright._impl._api_structures.SourceLocation
 StorageState = playwright._impl._api_structures.StorageState
 ViewportSize = playwright._impl._api_structures.ViewportSize
 
-Error = playwright._impl._api_types.Error
-TimeoutError = playwright._impl._api_types.TimeoutError
+Error = playwright._impl._errors.Error
+TimeoutError = playwright._impl._errors.TimeoutError
 
 
 def async_playwright() -> PlaywrightContextManager:
     return PlaywrightContextManager()
 
 
-@overload
-def expect(actual: Page) -> PageAssertions:
-    ...
+class Expect:
+    _unset: Any = object()
+
+    def __init__(self) -> None:
+        self._timeout: Optional[float] = None
+
+    def set_options(self, timeout: Optional[float] = _unset) -> None:
+        """
+        This method sets global `expect()` options.
+
+        Args:
+            timeout (float): Timeout value in milliseconds. Default to 5000 milliseconds.
+
+        Returns:
+            None
+        """
+        if timeout is not self._unset:
+            self._timeout = timeout
+
+    @overload
+    def __call__(
+        self, actual: Page, message: Optional[str] = None
+    ) -> PageAssertions: ...
+
+    @overload
+    def __call__(
+        self, actual: Locator, message: Optional[str] = None
+    ) -> LocatorAssertions: ...
+
+    @overload
+    def __call__(
+        self, actual: APIResponse, message: Optional[str] = None
+    ) -> APIResponseAssertions: ...
+
+    def __call__(
+        self, actual: Union[Page, Locator, APIResponse], message: Optional[str] = None
+    ) -> Union[PageAssertions, LocatorAssertions, APIResponseAssertions]:
+        if isinstance(actual, Page):
+            return PageAssertions(
+                PageAssertionsImpl(actual._impl_obj, self._timeout, message=message)
+            )
+        elif isinstance(actual, Locator):
+            return LocatorAssertions(
+                LocatorAssertionsImpl(actual._impl_obj, self._timeout, message=message)
+            )
+        elif isinstance(actual, APIResponse):
+            return APIResponseAssertions(
+                APIResponseAssertionsImpl(
+                    actual._impl_obj, self._timeout, message=message
+                )
+            )
+        raise ValueError(f"Unsupported type: {type(actual)}")
 
 
-@overload
-def expect(actual: Locator) -> LocatorAssertions:
-    ...
-
-
-@overload
-def expect(actual: APIResponse) -> APIResponseAssertions:
-    ...
-
-
-def expect(
-    actual: Union[Page, Locator, APIResponse]
-) -> Union[PageAssertions, LocatorAssertions, APIResponseAssertions]:
-    if isinstance(actual, Page):
-        return PageAssertions(PageAssertionsImpl(actual._impl_obj))
-    elif isinstance(actual, Locator):
-        return LocatorAssertions(LocatorAssertionsImpl(actual._impl_obj))
-    elif isinstance(actual, APIResponse):
-        return APIResponseAssertions(APIResponseAssertionsImpl(actual._impl_obj))
-    raise ValueError(f"Unsupported type: {type(actual)}")
+expect = Expect()
 
 
 __all__ = [
@@ -135,6 +167,7 @@ __all__ = [
     "FilePayload",
     "FloatRect",
     "Frame",
+    "FrameLocator",
     "Geolocation",
     "HttpCredentials",
     "JSHandle",
@@ -158,5 +191,6 @@ __all__ = [
     "Video",
     "ViewportSize",
     "WebSocket",
+    "WebSocketRoute",
     "Worker",
 ]

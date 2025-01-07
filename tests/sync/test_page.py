@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from playwright.sync_api import Page
+import pytest
+
+from playwright.sync_api import Error, Page
 from tests.server import Server
 
 
@@ -66,3 +68,49 @@ def test_should_set_bodysize_to_0(page: Page, server: Server) -> None:
     sizes = request.sizes()
     assert sizes["requestBodySize"] == 0
     assert sizes["requestHeadersSize"] >= 200
+
+
+def test_sync_stacks_should_work(page: Page, server: Server) -> None:
+    page.route("**/empty.html", lambda route: route.abort())
+    with pytest.raises(Error) as exc_info:
+        page.goto(server.EMPTY_PAGE)
+    assert exc_info.value.stack
+    assert __file__ in exc_info.value.stack
+
+
+def test_emitted_for_domcontentloaded_and_load(page: Page, server: Server) -> None:
+    with page.expect_event("domcontentloaded") as dom_info:
+        with page.expect_event("load") as load_info:
+            page.goto(server.EMPTY_PAGE)
+    assert isinstance(dom_info.value, Page)
+    assert isinstance(load_info.value, Page)
+
+
+def test_page_pause_should_reset_default_timeouts(
+    page: Page, headless: bool, server: Server
+) -> None:
+    if not headless:
+        pytest.skip()
+
+    page.goto(server.EMPTY_PAGE)
+    page.pause()
+    with pytest.raises(Error, match="Timeout 30000ms exceeded."):
+        page.get_by_text("foo").click()
+
+
+def test_page_pause_should_reset_custom_timeouts(
+    page: Page, headless: bool, server: Server
+) -> None:
+    if not headless:
+        pytest.skip()
+
+    page.set_default_timeout(123)
+    page.set_default_navigation_timeout(456)
+    page.goto(server.EMPTY_PAGE)
+    page.pause()
+    with pytest.raises(Error, match="Timeout 123ms exceeded."):
+        page.get_by_text("foo").click()
+
+    server.set_route("/empty.html", lambda route: None)
+    with pytest.raises(Error, match="Timeout 456ms exceeded."):
+        page.goto(server.EMPTY_PAGE)

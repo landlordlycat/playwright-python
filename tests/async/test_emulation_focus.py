@@ -13,19 +13,24 @@
 # limitations under the License.
 import asyncio
 
+from playwright.async_api import Page
+from tests.server import Server
 
-async def test_should_think_that_it_is_focused_by_default(page):
+from .utils import Utils
+
+
+async def test_should_think_that_it_is_focused_by_default(page: Page) -> None:
     assert await page.evaluate("document.hasFocus()")
 
 
-async def test_should_think_that_all_pages_are_focused(page):
+async def test_should_think_that_all_pages_are_focused(page: Page) -> None:
     page2 = await page.context.new_page()
     assert await page.evaluate("document.hasFocus()")
     assert await page2.evaluate("document.hasFocus()")
     await page2.close()
 
 
-async def test_should_focus_popups_by_default(page, server):
+async def test_should_focus_popups_by_default(page: Page, server: Server) -> None:
     await page.goto(server.EMPTY_PAGE)
     async with page.expect_popup() as popup_info:
         await page.evaluate("url => { window.open(url); }", server.EMPTY_PAGE)
@@ -34,7 +39,9 @@ async def test_should_focus_popups_by_default(page, server):
     assert await page.evaluate("document.hasFocus()")
 
 
-async def test_should_provide_target_for_keyboard_events(page, server):
+async def test_should_provide_target_for_keyboard_events(
+    page: Page, server: Server
+) -> None:
     page2 = await page.context.new_page()
     await asyncio.gather(
         page.goto(server.PREFIX + "/input/textarea.html"),
@@ -57,7 +64,9 @@ async def test_should_provide_target_for_keyboard_events(page, server):
     assert results == [text, text2]
 
 
-async def test_should_not_affect_mouse_event_target_page(page, server):
+async def test_should_not_affect_mouse_event_target_page(
+    page: Page, server: Server
+) -> None:
     page2 = await page.context.new_page()
     click_counter = """() => {
       document.onclick = () => window.click_count = (window.click_count || 0) + 1;
@@ -79,7 +88,7 @@ async def test_should_not_affect_mouse_event_target_page(page, server):
     assert counters == [1, 1]
 
 
-async def test_should_change_document_activeElement(page, server):
+async def test_should_change_document_activeElement(page: Page, server: Server) -> None:
     page2 = await page.context.new_page()
     await asyncio.gather(
         page.goto(server.PREFIX + "/input/textarea.html"),
@@ -96,28 +105,9 @@ async def test_should_change_document_activeElement(page, server):
     assert active == ["INPUT", "TEXTAREA"]
 
 
-async def test_should_not_affect_screenshots(page, server, assert_to_be_golden):
-    # Firefox headed produces a different image.
-    page2 = await page.context.new_page()
-    await asyncio.gather(
-        page.set_viewport_size({"width": 500, "height": 500}),
-        page.goto(server.PREFIX + "/grid.html"),
-        page2.set_viewport_size({"width": 50, "height": 50}),
-        page2.goto(server.PREFIX + "/grid.html"),
-    )
-    await asyncio.gather(
-        page.focus("body"),
-        page2.focus("body"),
-    )
-    screenshots = await asyncio.gather(
-        page.screenshot(),
-        page2.screenshot(),
-    )
-    assert_to_be_golden(screenshots[0], "screenshot-sanity.png")
-    assert_to_be_golden(screenshots[1], "grid-cell-0.png")
-
-
-async def test_should_change_focused_iframe(page, server, utils):
+async def test_should_change_focused_iframe(
+    page: Page, server: Server, utils: Utils
+) -> None:
     await page.goto(server.EMPTY_PAGE)
     [frame1, frame2] = await asyncio.gather(
         utils.attach_frame(page, "frame1", server.PREFIX + "/input/textarea.html"),

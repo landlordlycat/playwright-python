@@ -17,7 +17,6 @@ from typing import Dict
 from playwright._impl._browser_type import BrowserType
 from playwright._impl._connection import ChannelOwner, from_channel
 from playwright._impl._fetch import APIRequest
-from playwright._impl._local_utils import LocalUtils
 from playwright._impl._selectors import Selectors, SelectorsOwner
 
 
@@ -41,19 +40,14 @@ class Playwright(ChannelOwner):
         self.webkit = from_channel(initializer["webkit"])
         self.webkit._playwright = self
 
-        self.selectors = Selectors(self._loop)
+        self.selectors = Selectors(self._loop, self._dispatcher_fiber)
         selectors_owner: SelectorsOwner = from_channel(initializer["selectors"])
         self.selectors._add_channel(selectors_owner)
 
         self._connection.on(
             "close", lambda: self.selectors._remove_channel(selectors_owner)
         )
-        self.devices = {}
-        self.devices = {
-            device["name"]: parse_device_descriptor(device["descriptor"])
-            for device in initializer["deviceDescriptors"]
-        }
-        self._utils: LocalUtils = from_channel(initializer["utils"])
+        self.devices = self._connection.local_utils.devices
 
     def __getitem__(self, value: str) -> "BrowserType":
         if value == "chromium":
@@ -64,21 +58,11 @@ class Playwright(ChannelOwner):
             return self.webkit
         raise ValueError("Invalid browser " + value)
 
-    def _set_selectors(self, selectors: SelectorsOwner) -> None:
+    def _set_selectors(self, selectors: Selectors) -> None:
         selectors_owner = from_channel(self._initializer["selectors"])
         self.selectors._remove_channel(selectors_owner)
         self.selectors = selectors
         self.selectors._add_channel(selectors_owner)
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         pass
-
-
-def parse_device_descriptor(dict: Dict) -> Dict:
-    return {
-        "user_agent": dict["userAgent"],
-        "viewport": dict["viewport"],
-        "device_scale_factor": dict["deviceScaleFactor"],
-        "is_mobile": dict["isMobile"],
-        "has_touch": dict["hasTouch"],
-    }

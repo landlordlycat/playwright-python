@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import inspect
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
-from playwright._impl._api_types import Error
+from playwright._impl._errors import Error
+from playwright._impl._map import Map
 
 API_ATTR = "_pw_api_instance_"
 IMPL_ATTR = "_pw_impl_instance_"
@@ -36,13 +37,31 @@ class ImplToApiMapping:
     def register(self, impl_class: type, api_class: type) -> None:
         self._mapping[impl_class] = api_class
 
-    def from_maybe_impl(self, obj: Any) -> Any:
+    def from_maybe_impl(
+        self, obj: Any, visited: Optional[Map[Any, Union[List, Dict]]] = None
+    ) -> Any:
+        # Python does share default arguments between calls, so we need to
+        # create a new map if it is not provided.
+        if not visited:
+            visited = Map()
         if not obj:
             return obj
         if isinstance(obj, dict):
-            return {name: self.from_maybe_impl(value) for name, value in obj.items()}
+            if obj in visited:
+                return visited[obj]
+            o: Dict = {}
+            visited[obj] = o
+            for name, value in obj.items():
+                o[name] = self.from_maybe_impl(value, visited)
+            return o
         if isinstance(obj, list):
-            return [self.from_maybe_impl(item) for item in obj]
+            if obj in visited:
+                return visited[obj]
+            a: List = []
+            visited[obj] = a
+            for item in obj:
+                a.append(self.from_maybe_impl(item, visited))
+            return a
         api_class = self._mapping.get(type(obj))
         if api_class:
             api_instance = getattr(obj, API_ATTR, None)
@@ -62,27 +81,43 @@ class ImplToApiMapping:
     def from_impl_nullable(self, obj: Any = None) -> Optional[Any]:
         return self.from_impl(obj) if obj else None
 
-    def from_impl_list(self, items: List[Any]) -> List[Any]:
+    def from_impl_list(self, items: Sequence[Any]) -> List[Any]:
         return list(map(lambda a: self.from_impl(a), items))
 
     def from_impl_dict(self, map: Dict[str, Any]) -> Dict[str, Any]:
         return {name: self.from_impl(value) for name, value in map.items()}
 
-    def to_impl(self, obj: Any) -> Any:
+    def to_impl(
+        self, obj: Any, visited: Optional[Map[Any, Union[List, Dict]]] = None
+    ) -> Any:
+        if visited is None:
+            visited = Map()
         try:
             if not obj:
                 return obj
             if isinstance(obj, dict):
-                return {name: self.to_impl(value) for name, value in obj.items()}
+                if obj in visited:
+                    return visited[obj]
+                o: Dict = {}
+                visited[obj] = o
+                for name, value in obj.items():
+                    o[name] = self.to_impl(value, visited)
+                return o
             if isinstance(obj, list):
-                return [self.to_impl(item) for item in obj]
+                if obj in visited:
+                    return visited[obj]
+                a: List = []
+                visited[obj] = a
+                for item in obj:
+                    a.append(self.to_impl(item, visited))
+                return a
             if isinstance(obj, ImplWrapper):
                 return obj._impl_obj
             return obj
         except RecursionError:
             raise Error("Maximum argument depth exceeded")
 
-    def wrap_handler(self, handler: Callable[..., None]) -> Callable[..., None]:
+    def wrap_handler(self, handler: Callable[..., Any]) -> Callable[..., None]:
         def wrapper_func(*args: Any) -> Any:
             arg_count = len(inspect.signature(handler).parameters)
             return handler(

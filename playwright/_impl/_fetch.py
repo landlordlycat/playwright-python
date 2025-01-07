@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Union, cast
 
 import playwright._impl._network as network
 from playwright._impl._api_structures import (
+    ClientCertificate,
     FilePayload,
     FormField,
     Headers,
@@ -30,21 +31,29 @@ from playwright._impl._api_structures import (
     StorageState,
 )
 from playwright._impl._connection import ChannelOwner, from_channel
+from playwright._impl._errors import is_target_closed_error
 from playwright._impl._helper import (
     Error,
     NameValue,
+    TargetClosedError,
     async_readfile,
     async_writefile,
     is_file_payload,
-    is_safe_close_error,
     locals_to_params,
     object_to_array,
+    to_impl,
 )
-from playwright._impl._network import serialize_headers
+from playwright._impl._network import serialize_headers, to_client_certificates_protocol
 from playwright._impl._tracing import Tracing
 
 if typing.TYPE_CHECKING:
     from playwright._impl._playwright import Playwright
+
+
+FormType = Dict[str, Union[bool, float, str]]
+DataType = Union[Any, bytes, str]
+MultipartType = Dict[str, Union[bytes, bool, float, str, FilePayload]]
+ParamsType = Union[Dict[str, Union[bool, float, str]], str]
 
 
 class APIRequest:
@@ -63,6 +72,7 @@ class APIRequest:
         userAgent: str = None,
         timeout: float = None,
         storageState: Union[StorageState, str, Path] = None,
+        clientCertificates: List[ClientCertificate] = None,
     ) -> "APIRequestContext":
         params = locals_to_params(locals())
         if "storageState" in params:
@@ -73,11 +83,13 @@ class APIRequest:
                 )
         if "extraHTTPHeaders" in params:
             params["extraHTTPHeaders"] = serialize_headers(params["extraHTTPHeaders"])
+        params["clientCertificates"] = await to_client_certificates_protocol(
+            params.get("clientCertificates")
+        )
         context = cast(
             APIRequestContext,
             from_channel(await self.playwright._channel.send("newRequest", params)),
         )
-        context._tracing._local_utils = self.playwright._utils
         return context
 
 
@@ -87,21 +99,31 @@ class APIRequestContext(ChannelOwner):
     ) -> None:
         super().__init__(parent, type, guid, initializer)
         self._tracing: Tracing = from_channel(initializer["tracing"])
+        self._close_reason: Optional[str] = None
 
-    async def dispose(self) -> None:
-        await self._channel.send("dispose")
+    async def dispose(self, reason: str = None) -> None:
+        self._close_reason = reason
+        try:
+            await self._channel.send("dispose", {"reason": reason})
+        except Error as e:
+            if is_target_closed_error(e):
+                return
+            raise e
+        self._tracing._reset_stack_counter()
 
     async def delete(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
-        data: Union[Any, bytes, str] = None,
-        form: Dict[str, Union[bool, float, str]] = None,
-        multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
+        data: DataType = None,
+        form: FormType = None,
+        multipart: MultipartType = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
@@ -114,57 +136,81 @@ class APIRequestContext(ChannelOwner):
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def head(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
+        data: DataType = None,
+        form: FormType = None,
+        multipart: MultipartType = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
             method="HEAD",
             params=params,
             headers=headers,
+            data=data,
+            form=form,
+            multipart=multipart,
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def get(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
+        data: DataType = None,
+        form: FormType = None,
+        multipart: MultipartType = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
             method="GET",
             params=params,
             headers=headers,
+            data=data,
+            form=form,
+            multipart=multipart,
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def patch(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
-        data: Union[Any, bytes, str] = None,
-        form: Dict[str, Union[bool, float, str]] = None,
+        data: DataType = None,
+        form: FormType = None,
         multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
@@ -177,19 +223,23 @@ class APIRequestContext(ChannelOwner):
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def put(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
-        data: Union[Any, bytes, str] = None,
-        form: Dict[str, Union[bool, float, str]] = None,
+        data: DataType = None,
+        form: FormType = None,
         multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
@@ -202,19 +252,23 @@ class APIRequestContext(ChannelOwner):
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def post(
         self,
         url: str,
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         headers: Headers = None,
-        data: Union[Any, bytes, str] = None,
-        form: Dict[str, Union[bool, float, str]] = None,
+        data: DataType = None,
+        form: FormType = None,
         multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
         return await self.fetch(
             url,
@@ -227,29 +281,78 @@ class APIRequestContext(ChannelOwner):
             timeout=timeout,
             failOnStatusCode=failOnStatusCode,
             ignoreHTTPSErrors=ignoreHTTPSErrors,
+            maxRedirects=maxRedirects,
+            maxRetries=maxRetries,
         )
 
     async def fetch(
         self,
         urlOrRequest: Union[str, network.Request],
-        params: Dict[str, Union[bool, float, str]] = None,
+        params: ParamsType = None,
         method: str = None,
         headers: Headers = None,
-        data: Union[Any, bytes, str] = None,
-        form: Dict[str, Union[bool, float, str]] = None,
+        data: DataType = None,
+        form: FormType = None,
         multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
         timeout: float = None,
         failOnStatusCode: bool = None,
         ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
     ) -> "APIResponse":
-        request = urlOrRequest if isinstance(urlOrRequest, network.Request) else None
+        url = urlOrRequest if isinstance(urlOrRequest, str) else None
+        request = (
+            cast(network.Request, to_impl(urlOrRequest))
+            if isinstance(to_impl(urlOrRequest), network.Request)
+            else None
+        )
         assert request or isinstance(
             urlOrRequest, str
         ), "First argument must be either URL string or Request"
+        return await self._inner_fetch(
+            request,
+            url,
+            method,
+            headers,
+            data,
+            params,
+            form,
+            multipart,
+            timeout,
+            failOnStatusCode,
+            ignoreHTTPSErrors,
+            maxRedirects,
+            maxRetries,
+        )
+
+    async def _inner_fetch(
+        self,
+        request: Optional[network.Request],
+        url: Optional[str],
+        method: str = None,
+        headers: Headers = None,
+        data: DataType = None,
+        params: ParamsType = None,
+        form: FormType = None,
+        multipart: Dict[str, Union[bytes, bool, float, str, FilePayload]] = None,
+        timeout: float = None,
+        failOnStatusCode: bool = None,
+        ignoreHTTPSErrors: bool = None,
+        maxRedirects: int = None,
+        maxRetries: int = None,
+    ) -> "APIResponse":
+        if self._close_reason:
+            raise TargetClosedError(self._close_reason)
         assert (
             (1 if data else 0) + (1 if form else 0) + (1 if multipart else 0)
         ) <= 1, "Only one of 'data', 'form' or 'multipart' can be specified"
-        url = request.url if request else urlOrRequest
+        assert (
+            maxRedirects is None or maxRedirects >= 0
+        ), "'max_redirects' must be greater than or equal to '0'"
+        assert (
+            maxRetries is None or maxRetries >= 0
+        ), "'max_retries' must be greater than or equal to '0'"
+        url = url or (request.url if request else url)
         method = method or (request.method if request else "GET")
         # Cannot call allHeaders() here as the request may be paused inside route handler.
         headers_obj = headers or (request.headers if request else None)
@@ -258,16 +361,16 @@ class APIRequestContext(ChannelOwner):
         form_data: Optional[List[NameValue]] = None
         multipart_data: Optional[List[FormField]] = None
         post_data_buffer: Optional[bytes] = None
-        if data:
+        if data is not None:
             if isinstance(data, str):
                 if is_json_content_type(serialized_headers):
-                    json_data = data
+                    json_data = data if is_json_parsable(data) else json.dumps(data)
                 else:
                     post_data_buffer = data.encode()
             elif isinstance(data, bytes):
                 post_data_buffer = data
             elif isinstance(data, (dict, list, int, bool)):
-                json_data = data
+                json_data = json.dumps(data)
             else:
                 raise Error(f"Unsupported 'data' type: {type(data)}")
         elif form:
@@ -297,26 +400,24 @@ class APIRequestContext(ChannelOwner):
             base64.b64encode(post_data_buffer).decode() if post_data_buffer else None
         )
 
-        def filter_none(input: Dict) -> Dict:
-            return {k: v for k, v in input.items() if v is not None}
-
         response = await self._channel.send(
             "fetch",
-            filter_none(
-                {
-                    "url": url,
-                    "params": object_to_array(params),
-                    "method": method,
-                    "headers": serialized_headers,
-                    "postData": post_data,
-                    "jsonData": json_data,
-                    "formData": form_data,
-                    "multipartData": multipart_data,
-                    "timeout": timeout,
-                    "failOnStatusCode": failOnStatusCode,
-                    "ignoreHTTPSErrors": ignoreHTTPSErrors,
-                }
-            ),
+            {
+                "url": url,
+                "params": object_to_array(params) if isinstance(params, dict) else None,
+                "encodedParams": params if isinstance(params, str) else None,
+                "method": method,
+                "headers": serialized_headers,
+                "postData": post_data,
+                "jsonData": json_data,
+                "formData": form_data,
+                "multipartData": multipart_data,
+                "timeout": timeout,
+                "failOnStatusCode": failOnStatusCode,
+                "ignoreHTTPSErrors": ignoreHTTPSErrors,
+                "maxRedirects": maxRedirects,
+                "maxRetries": maxRetries,
+            },
         )
         return APIResponse(self, response)
 
@@ -384,7 +485,7 @@ class APIResponse:
                 raise Error("Response has been disposed")
             return base64.b64decode(result["binary"])
         except Error as exc:
-            if is_safe_close_error(exc):
+            if is_target_closed_error(exc):
                 raise Error("Response has been disposed")
             raise exc
 
@@ -424,3 +525,13 @@ def is_json_content_type(headers: network.HeadersArray = None) -> bool:
         if header["name"] == "Content-Type":
             return header["value"].startswith("application/json")
     return False
+
+
+def is_json_parsable(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        json.loads(value)
+        return True
+    except json.JSONDecodeError:
+        return False
